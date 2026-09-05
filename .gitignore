@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Tests / caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Unused OCR resources and installer
+/vendor/tesseract-installer.exe
+/vendor/unused-ocr-script-models/
+
+# Temporary files
+*.tmp
+*.log
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Local user data
+data.json
+draw_log.json
+
+# Exported media
+*.mp4
+
+# Archives
+*.zip
