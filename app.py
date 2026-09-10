@@ -517,6 +517,12 @@ class DrawResult:
 
 
 @dataclass(frozen=True)
+class LastWinInfo:
+    draws_ago: int
+    days_ago: int | None
+
+
+@dataclass(frozen=True)
 class RecordedWheelFrame:
     rotation: float
     names: tuple[str, ...]
@@ -558,6 +564,54 @@ def draw_result_date(value: str) -> date | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
     except (AttributeError, TypeError, ValueError):
         return None
+
+
+def last_win_statistics(
+    results: list[DrawResult],
+    today: date | None = None,
+) -> dict[str, LastWinInfo]:
+    """Return the latest win age for each exact, whitespace-cleaned name.
+
+    Entries with the same timestamp belong to one multi-winner draw. The most
+    recently appended distinct timestamp is draw number one.
+    """
+
+    reference_day = today or datetime.now().astimezone().date()
+    draw_number_by_timestamp: dict[str, int] = {}
+    for result in reversed(results):
+        if result.timestamp not in draw_number_by_timestamp:
+            draw_number_by_timestamp[result.timestamp] = (
+                len(draw_number_by_timestamp) + 1
+            )
+
+    statistics: dict[str, LastWinInfo] = {}
+    for result in reversed(results):
+        key = clean_nickname(result.winner)
+        if not key or key in statistics:
+            continue
+        won_on = draw_result_date(result.timestamp)
+        days_ago = (
+            max(0, (reference_day - won_on).days)
+            if won_on is not None
+            else None
+        )
+        statistics[key] = LastWinInfo(
+            draw_number_by_timestamp[result.timestamp],
+            days_ago,
+        )
+    return statistics
+
+
+def format_draws_ago(value: int) -> str:
+    remainder_100 = value % 100
+    remainder_10 = value % 10
+    if remainder_10 == 1 and remainder_100 != 11:
+        noun = "розыгрыш"
+    elif remainder_10 in (2, 3, 4) and remainder_100 not in (12, 13, 14):
+        noun = "розыгрыша"
+    else:
+        noun = "розыгрышей"
+    return f"{value} {noun} назад"
 
 
 def parse_bm(value: str) -> float:
@@ -2498,6 +2552,7 @@ class DrawHistoryDialog(tk.Toplevel):
                 parent=self,
             )
             return
+        self.owner.refresh_last_wins()
         self.refresh()
 
     def _sync_scroll_region(self, _event: tk.Event[tk.Misc]) -> None:
@@ -3619,6 +3674,8 @@ class ParticipantsPanel(tk.Frame):
         self._syncing_select_all = False
         self._bulk_selection = False
         self._clear_focus_after_restore = False
+        self._last_win_statistics: dict[str, LastWinInfo] = {}
+        self._load_last_win_statistics()
         influence = owner.bm_influence_percent
         influence_text = (
             str(int(influence))
@@ -3655,6 +3712,18 @@ class ParticipantsPanel(tk.Frame):
 
     def _px(self, value: float, minimum: int = 1) -> int:
         return max(minimum, round(value * self.ui_scale))
+
+    def _load_last_win_statistics(self) -> None:
+        try:
+            results = self.owner.draw_log_store.load()
+        except (OSError, ValueError, TypeError):
+            results = []
+        self._last_win_statistics = last_win_statistics(results)
+
+    def refresh_last_wins(self) -> None:
+        self._load_last_win_statistics()
+        for row_data in self.rows:
+            self._update_row_last_win(row_data)
 
     def _build_ui(self) -> None:
         heading = tk.Frame(self, bg=PANEL_BACKGROUND)
@@ -3731,18 +3800,47 @@ class ParticipantsPanel(tk.Frame):
                 row=0,
                 column=column,
                 sticky="nsew",
-                padx=self._px(6),
+                padx=(self._px(6), self._px(3))
+                if column == 0
+                else (self._px(3), self._px(6)),
             )
+            column_header.grid_rowconfigure(0, weight=1)
+            column_header.grid_columnconfigure(0, minsize=self._px(60))
+            column_header.grid_columnconfigure(1, weight=1)
+            column_header.grid_columnconfigure(2, minsize=self._px(89))
+            column_header.grid_columnconfigure(3, minsize=self._px(1))
+            column_header.grid_columnconfigure(4, minsize=self._px(166))
+            column_header.grid_columnconfigure(5, minsize=self._px(48))
             tk.Label(
                 column_header,
                 text="ИГРОК",
                 bg=SURFACE,
                 fg=MUTED,
                 font=("Segoe UI Semibold", 9),
-            ).pack(
-                side="left",
-                padx=(self._px(53), 0),
-                pady=(self._px(6), self._px(4)),
+            ).grid(
+                row=0,
+                column=1,
+                sticky="w",
+            )
+            tk.Label(
+                column_header,
+                text="ПОСЛЕДНЯЯ ПОБЕДА",
+                bg=SURFACE,
+                fg=MUTED,
+                font=("Segoe UI Semibold", 9),
+            ).grid(
+                row=0,
+                column=4,
+            )
+            tk.Frame(
+                column_header,
+                bg="#343B36",
+                width=self._px(1),
+            ).grid(
+                row=0,
+                column=3,
+                sticky="ns",
+                pady=self._px(5),
             )
             tk.Label(
                 column_header,
@@ -3750,10 +3848,9 @@ class ParticipantsPanel(tk.Frame):
                 bg=SURFACE,
                 fg=MUTED,
                 font=("Segoe UI Semibold", 9),
-            ).pack(
-                side="right",
-                padx=(0, self._px(48)),
-                pady=(self._px(6), self._px(4)),
+            ).grid(
+                row=0,
+                column=2,
             )
         tk.Frame(list_shell, bg="#343B36", height=self._px(1)).pack(fill="x")
 
@@ -3931,6 +4028,45 @@ class ParticipantsPanel(tk.Frame):
         button.bind("<Leave>", leave)
         return button
 
+    def _update_row_last_win(self, row_data: dict[str, object]) -> None:
+        name_var = row_data.get("name")
+        icon = row_data.get("last_win_icon")
+        primary = row_data.get("last_win_primary")
+        secondary = row_data.get("last_win_secondary")
+        if not (
+            isinstance(name_var, tk.StringVar)
+            and isinstance(icon, tk.Label)
+            and isinstance(primary, tk.Label)
+            and isinstance(secondary, tk.Label)
+        ):
+            return
+
+        info = self._last_win_statistics.get(clean_nickname(name_var.get()))
+        if info is None:
+            icon.configure(
+                text="◷",
+                fg=DISABLED_TEXT,
+                font=("Segoe UI Symbol", 15),
+            )
+            primary.configure(text="Никогда", fg=MUTED)
+            primary.place(relx=0.0, rely=0.5, anchor="w")
+            secondary.place_forget()
+            return
+
+        icon.configure(
+            text="🏆",
+            fg=ACCENT_HOVER,
+            font=("Segoe UI Emoji", 13),
+        )
+        font_size = 9 if info.draws_ago < 100 else (8 if info.draws_ago < 1000 else 7)
+        primary.configure(
+            text=format_draws_ago(info.draws_ago),
+            fg=ACCENT_HOVER,
+            font=("Segoe UI Semibold", font_size),
+        )
+        primary.place(relx=0.0, rely=0.5, anchor="w")
+        secondary.place_forget()
+
     def _add_row(
         self,
         name: str = "",
@@ -3940,9 +4076,11 @@ class ParticipantsPanel(tk.Frame):
     ) -> None:
         row = tk.Frame(self.rows_frame, bg=SURFACE)
         content = tk.Frame(
-            row, bg=SURFACE, padx=self._px(10), pady=self._px(1)
+            row, bg=SURFACE, padx=self._px(10), pady=0
         )
         content.pack(fill="x")
+        content.grid_columnconfigure(2, weight=1)
+        content.grid_columnconfigure(5, minsize=self._px(156))
         separator = tk.Frame(row, bg="#343B36", height=self._px(1))
         separator.pack(fill="x", padx=self._px(8))
 
@@ -3951,8 +4089,11 @@ class ParticipantsPanel(tk.Frame):
             bg=ACCENT if enabled else SURFACE,
             width=self._px(3),
         )
-        selection_strip.pack(
-            side="left", fill="y", padx=(0, self._px(7))
+        selection_strip.grid(
+            row=0,
+            column=0,
+            sticky="ns",
+            padx=(0, self._px(7)),
         )
         selection_strip.pack_propagate(False)
 
@@ -3962,12 +4103,13 @@ class ParticipantsPanel(tk.Frame):
             variable=enabled_var,
             background=SURFACE,
         )
-        check.pack(side="left", padx=(0, self._px(10)))
+        check.grid(row=0, column=1, padx=(0, self._px(10)))
 
         name_var = tk.StringVar(value=name)
         entry = tk.Entry(
             content,
             textvariable=name_var,
+            width=8,
             bg=SURFACE,
             fg=TEXT,
             insertbackground=TEXT,
@@ -3980,8 +4122,11 @@ class ParticipantsPanel(tk.Frame):
             highlightcolor=BORDER_LIGHT,
         )
         enable_entry_shortcuts(entry)
-        entry.pack(
-            side="left", fill="x", expand=True, ipady=self._px(2)
+        entry.grid(
+            row=0,
+            column=2,
+            sticky="ew",
+            ipady=self._px(2),
         )
 
         bm_text = format_bm(bm)
@@ -4003,9 +4148,11 @@ class ParticipantsPanel(tk.Frame):
             highlightcolor=BORDER_LIGHT,
         )
         enable_entry_shortcuts(bm_entry)
-        bm_entry.pack(
-            side="left",
-            padx=(self._px(12), 0),
+        bm_entry.grid(
+            row=0,
+            column=3,
+            sticky="ew",
+            padx=(self._px(12), self._px(10)),
             ipady=self._px(3),
         )
 
@@ -4028,13 +4175,78 @@ class ParticipantsPanel(tk.Frame):
             background=SURFACE,
         )
         row_data["delete"] = delete
-        delete.pack(side="right", padx=(self._px(8), 0))
+        delete.grid(row=0, column=6, padx=(self._px(8), 0))
+
+        last_win_separator = tk.Frame(
+            content,
+            bg="#343B36",
+            width=self._px(1),
+        )
+        last_win_separator.grid(
+            row=0,
+            column=4,
+            sticky="ns",
+            pady=self._px(4),
+        )
+
+        last_win = tk.Frame(
+            content,
+            bg=SURFACE,
+            width=self._px(156),
+            height=self._px(32),
+        )
+        last_win.grid(
+            row=0,
+            column=5,
+            sticky="nsew",
+            padx=(self._px(10), 0),
+        )
+        last_win.pack_propagate(False)
+        last_win_icon = tk.Label(
+            last_win,
+            text="◷",
+            bg=SURFACE,
+            fg=DISABLED_TEXT,
+            font=("Segoe UI Symbol", 15),
+        )
+        last_win_icon.pack(side="left", padx=(0, self._px(5)))
+        last_win_text = tk.Frame(last_win, bg=SURFACE)
+        last_win_text.pack(side="left", fill="both", expand=True)
+        last_win_primary = tk.Label(
+            last_win_text,
+            text="Никогда",
+            bg=SURFACE,
+            fg=MUTED,
+            font=("Segoe UI Semibold", 9),
+            anchor="w",
+        )
+        last_win_secondary = tk.Label(
+            last_win_text,
+            bg=SURFACE,
+            fg=MUTED,
+            font=("Segoe UI", 6),
+            anchor="w",
+        )
+        row_data.update(
+            {
+                "last_win": last_win,
+                "last_win_separator": last_win_separator,
+                "last_win_icon": last_win_icon,
+                "last_win_text": last_win_text,
+                "last_win_primary": last_win_primary,
+                "last_win_secondary": last_win_secondary,
+            }
+        )
+        self._update_row_last_win(row_data)
         self.rows.append(row_data)
         self._place_row(row_data, len(self.rows) - 1)
         self._refresh_select_all_state()
         self._update_guild_count()
 
         name_var.trace_add("write", self._on_text_value_changed)
+        name_var.trace_add(
+            "write", lambda *_args, data=row_data: self._update_row_last_win(data)
+        )
         bm_var.trace_add("write", self._on_text_value_changed)
         enabled_var.trace_add("write", self._on_toggle_value_changed)
         enabled_var.trace_add(
@@ -4046,7 +4258,21 @@ class ParticipantsPanel(tk.Frame):
         bm_entry.bind("<FocusIn>", self._on_entry_focus_in, add="+")
         bm_entry.bind("<FocusOut>", self._on_entry_focus_out, add="+")
 
-        hover_widgets = (row, content, selection_strip, check, entry, bm_entry, delete)
+        hover_widgets = (
+            row,
+            content,
+            selection_strip,
+            check,
+            entry,
+            bm_entry,
+            last_win_separator,
+            last_win,
+            last_win_icon,
+            last_win_text,
+            last_win_primary,
+            last_win_secondary,
+            delete,
+        )
         for widget in hover_widgets:
             widget.bind(
                 "<Enter>",
@@ -4134,6 +4360,13 @@ class ParticipantsPanel(tk.Frame):
         name_entry = row_data.get("name_entry")
         bm_entry = row_data.get("bm_entry")
         delete = row_data.get("delete")
+        last_win_widgets = (
+            row_data.get("last_win"),
+            row_data.get("last_win_icon"),
+            row_data.get("last_win_text"),
+            row_data.get("last_win_primary"),
+            row_data.get("last_win_secondary"),
+        )
         if not isinstance(enabled_var, tk.BooleanVar):
             return
         hovered = bool(row_data.get("hovered"))
@@ -4149,6 +4382,9 @@ class ParticipantsPanel(tk.Frame):
             strip.configure(bg=ACCENT if enabled_var.get() else background)
         if isinstance(check, StyledCheckbutton):
             check.configure(bg=background)
+        for widget in last_win_widgets:
+            if isinstance(widget, (tk.Frame, tk.Label)):
+                widget.configure(bg=background)
         for entry in (name_entry, bm_entry):
             if isinstance(entry, tk.Entry):
                 normal_foreground = MUTED if entry is bm_entry else TEXT
@@ -4211,6 +4447,7 @@ class ParticipantsPanel(tk.Frame):
         self.history_dialog = DrawHistoryDialog(self)
 
     def refresh_history_dialog(self) -> None:
+        self.refresh_last_wins()
         if self.history_dialog is not None and self.history_dialog.winfo_exists():
             self.history_dialog.refresh()
 
@@ -4939,6 +5176,39 @@ class WheelApp(tk.Tk):
             fill="x", pady=(self._px(1), self._px(4))
         )
 
+        self.result_sort_button = tk.Button(
+            self.result_card,
+            text="⇅",
+            command=self._sort_winner_result_by_bm,
+            bg=WINNER_BACKGROUND,
+            fg=MUTED,
+            activebackground=SURFACE_LIGHT,
+            activeforeground=ACCENT_HOVER,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            cursor="hand2",
+            takefocus=False,
+            font=("Segoe UI Symbol", 13),
+            padx=0,
+            pady=0,
+        )
+
+        def sort_enter(_event: tk.Event[tk.Misc]) -> None:
+            self.result_sort_button.configure(
+                bg=SURFACE_LIGHT,
+                fg=ACCENT_HOVER,
+            )
+
+        def sort_leave(_event: tk.Event[tk.Misc]) -> None:
+            self.result_sort_button.configure(
+                bg=WINNER_BACKGROUND,
+                fg=MUTED,
+            )
+
+        self.result_sort_button.bind("<Enter>", sort_enter)
+        self.result_sort_button.bind("<Leave>", sort_leave)
+
         self.action_slot = tk.Frame(controls, bg=BACKGROUND)
         self.action_slot.pack(fill="x")
 
@@ -5023,9 +5293,24 @@ class WheelApp(tk.Tk):
 
     def _clear_winner_result(self) -> None:
         self.result_var.set("")
+        self.result_sort_button.place_forget()
         if self.result_card.winfo_manager():
             self.result_card.pack_forget()
         self.result_slot.configure(bg=BACKGROUND)
+
+    def _sort_winner_result_by_bm(self) -> None:
+        if len(self._roll_winners) < 2:
+            return
+        participants = self._roll_slots or self.participants
+        bm_by_name = {
+            participant.name: participant.bm for participant in participants
+        }
+        sorted_winners = sorted(
+            self._roll_winners,
+            key=lambda name: bm_by_name.get(name, float("-inf")),
+            reverse=True,
+        )
+        self._show_winner_result(" | ".join(sorted_winners))
 
     def _show_winner_result(self, winner: str) -> None:
         if len(winner) <= 24:
@@ -5044,6 +5329,18 @@ class WheelApp(tk.Tk):
             font=("Segoe UI Semibold", font_size),
             wraplength=self._px(740),
         )
+        if " | " in winner:
+            self.result_sort_button.place(
+                relx=1.0,
+                x=-self._px(6),
+                y=self._px(4),
+                anchor="ne",
+                width=self._px(27),
+                height=self._px(27),
+            )
+            self.result_sort_button.lift()
+        else:
+            self.result_sort_button.place_forget()
         self.result_slot.configure(bg=ACCENT_DARK)
         if not self.result_card.winfo_manager():
             self.result_card.pack(fill="both", expand=True, padx=1, pady=1)
