@@ -1,11 +1,20 @@
 import json
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from app import DrawLogStore, DrawResult, WheelApp, format_draw_timestamp
+from app import (
+    DrawLogStore,
+    DrawResult,
+    LastWinInfo,
+    WheelApp,
+    format_draw_timestamp,
+    format_draws_ago,
+    last_win_statistics,
+)
 
 
 class DrawLogStoreTests(unittest.TestCase):
@@ -97,6 +106,41 @@ class DrawLogStoreTests(unittest.TestCase):
             format_draw_timestamp("2026-01-01T20:00:00+03:00"),
             "01.01.2026 20:00",
         )
+
+    def test_last_win_statistics_group_multi_winner_rows_as_one_draw(self) -> None:
+        results = [
+            DrawResult("A", "Prize 1", "2026-09-01T20:00:00+03:00"),
+            DrawResult("B", "Prize 2", "2026-09-04T20:00:00+03:00"),
+            DrawResult("C", "Prize 2", "2026-09-04T20:00:00+03:00"),
+            DrawResult("A", "Prize 3", "2026-09-09T20:00:00+03:00"),
+            DrawResult("D", "Prize 3", "2026-09-09T20:00:00+03:00"),
+        ]
+
+        statistics = last_win_statistics(results, date(2026, 9, 10))
+
+        self.assertEqual(statistics["A"], LastWinInfo(1, 1))
+        self.assertEqual(statistics["D"], LastWinInfo(1, 1))
+        self.assertEqual(statistics["B"], LastWinInfo(2, 6))
+        self.assertEqual(statistics["C"], LastWinInfo(2, 6))
+        self.assertNotIn("never", statistics)
+
+    def test_last_win_statistics_keep_name_case_significant(self) -> None:
+        results = [
+            DrawResult("XmelON", "Prize 1", "2026-09-08T20:00:00+03:00"),
+            DrawResult("Xmelon", "Prize 2", "2026-09-09T20:00:00+03:00"),
+        ]
+
+        statistics = last_win_statistics(results, date(2026, 9, 10))
+
+        self.assertEqual(statistics["XmelON"], LastWinInfo(2, 2))
+        self.assertEqual(statistics["Xmelon"], LastWinInfo(1, 1))
+
+    def test_draw_age_uses_correct_russian_word_form(self) -> None:
+        self.assertEqual(format_draws_ago(1), "1 розыгрыш назад")
+        self.assertEqual(format_draws_ago(2), "2 розыгрыша назад")
+        self.assertEqual(format_draws_ago(5), "5 розыгрышей назад")
+        self.assertEqual(format_draws_ago(11), "11 розыгрышей назад")
+        self.assertEqual(format_draws_ago(21), "21 розыгрыш назад")
 
 
 if __name__ == "__main__":

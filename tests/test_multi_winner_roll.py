@@ -45,6 +45,21 @@ class MultiWinnerRollTests(unittest.TestCase):
             self.assertEqual(recognized_winners, app._roll_winners)
             self.assertEqual(recorded_winners, app._roll_winners)
             self.assertEqual(app.result_var.get(), " | ".join(app._roll_winners))
+            original_winner_order = list(app._roll_winners)
+            bm_by_name = {
+                participant.name: participant.bm
+                for participant in app.participants
+            }
+            expected_bm_order = sorted(
+                original_winner_order,
+                key=bm_by_name.__getitem__,
+                reverse=True,
+            )
+            self.assertEqual(app.result_sort_button.winfo_manager(), "place")
+            app.result_sort_button.invoke()
+            self.assertEqual(app.result_var.get(), " | ".join(expected_bm_order))
+            self.assertEqual(app._roll_winners, original_winner_order)
+            self.assertEqual(recorded_winners, original_winner_order)
             self.assertEqual(
                 sum(value == 0 for value in app._roll_probabilities or []),
                 3,
