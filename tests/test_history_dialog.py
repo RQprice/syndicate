@@ -6,7 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app import DrawLogStore, DrawResult, WheelApp, handle_entry_shortcut
+from syndicate.application import WheelApp
+from syndicate.models import DrawResult
+from syndicate.platform import handle_entry_shortcut
+from syndicate.storage import DrawLogStore
 
 
 class DrawHistoryDialogTests(unittest.TestCase):
@@ -76,7 +79,9 @@ class DrawHistoryDialogTests(unittest.TestCase):
                 )
                 self.assertEqual(app.clipboard_get(), "Шлем Кари")
 
-                with patch("app.messagebox.askyesno", return_value=True):
+                with patch(
+                    "syndicate.history_ui.messagebox.askyesno", return_value=True
+                ):
                     dialog._delete(1)
 
                 self.assertEqual(store.load(), [first])
@@ -107,7 +112,9 @@ class DrawHistoryDialogTests(unittest.TestCase):
                 app.mainloop()
                 dialog.withdraw()
 
-                with patch("app.messagebox.askyesno", return_value=False):
+                with patch(
+                    "syndicate.history_ui.messagebox.askyesno", return_value=False
+                ):
                     dialog._delete(0)
 
                 self.assertEqual(store.load(), [result])

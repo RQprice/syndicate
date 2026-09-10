@@ -1,7 +1,7 @@
 import unittest
 
-from app import (
-    Participant,
+from syndicate.models import Participant
+from syndicate.probabilities import (
     participant_probabilities,
     participant_weights,
     weighted_random_index,

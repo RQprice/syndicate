@@ -5,7 +5,7 @@ from pathlib import Path
 import cv2
 from PIL import Image, ImageDraw
 
-from app import encode_mp4_frames
+from syndicate.video import encode_mp4_frames
 
 
 class Mp4ExportTests(unittest.TestCase):

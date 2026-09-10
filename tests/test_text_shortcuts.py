@@ -2,7 +2,8 @@ import tkinter as tk
 import unittest
 from types import SimpleNamespace
 
-from app import ScreenshotImportDialog, handle_entry_shortcut
+from syndicate.import_ui import ScreenshotImportDialog
+from syndicate.platform import handle_entry_shortcut
 
 
 class TextShortcutTests(unittest.TestCase):

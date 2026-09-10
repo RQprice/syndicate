@@ -6,15 +6,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from app import (
-    DrawLogStore,
+from syndicate.application import WheelApp
+from syndicate.models import (
     DrawResult,
     LastWinInfo,
-    WheelApp,
     format_draw_timestamp,
     format_draws_ago,
     last_win_statistics,
 )
+from syndicate.storage import DrawLogStore
 
 
 class DrawLogStoreTests(unittest.TestCase):
@@ -107,7 +107,7 @@ class DrawLogStoreTests(unittest.TestCase):
             "01.01.2026 20:00",
         )
 
-    def test_last_win_statistics_group_multi_winner_rows_as_one_draw(self) -> None:
+    def test_last_win_statistics_counts_each_history_row(self) -> None:
         results = [
             DrawResult("A", "Prize 1", "2026-09-01T20:00:00+03:00"),
             DrawResult("B", "Prize 2", "2026-09-04T20:00:00+03:00"),
@@ -118,10 +118,10 @@ class DrawLogStoreTests(unittest.TestCase):
 
         statistics = last_win_statistics(results, date(2026, 9, 10))
 
-        self.assertEqual(statistics["A"], LastWinInfo(1, 1))
+        self.assertEqual(statistics["A"], LastWinInfo(2, 1))
         self.assertEqual(statistics["D"], LastWinInfo(1, 1))
-        self.assertEqual(statistics["B"], LastWinInfo(2, 6))
-        self.assertEqual(statistics["C"], LastWinInfo(2, 6))
+        self.assertEqual(statistics["B"], LastWinInfo(4, 6))
+        self.assertEqual(statistics["C"], LastWinInfo(3, 6))
         self.assertNotIn("never", statistics)
 
     def test_last_win_statistics_keep_name_case_significant(self) -> None:

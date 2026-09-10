@@ -2,7 +2,8 @@ import time
 import unittest
 from unittest.mock import Mock
 
-from app import Participant, WheelApp
+from syndicate.application import WheelApp
+from syndicate.models import Participant
 
 
 class MultiWinnerRollTests(unittest.TestCase):

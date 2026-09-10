@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app import DEFAULT_BM_INFLUENCE_PERCENT, ParticipantStore
+from syndicate.storage import ParticipantStore
+from syndicate.theme import DEFAULT_BM_INFLUENCE_PERCENT
 
 
 class ParticipantStoreTests(unittest.TestCase):

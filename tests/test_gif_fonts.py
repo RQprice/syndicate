@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from app import WheelApp
+from syndicate.application import WheelApp
 
 
 class RecordingFontTests(unittest.TestCase):

@@ -5,7 +5,9 @@ from unittest.mock import Mock
 
 from PIL import Image, ImageFont
 
-from app import PrizeImageCard, PrizeQuantityControl, WheelApp
+from syndicate.application import WheelApp
+from syndicate.theme import BUTTON_HOVER, SURFACE_LIGHT
+from syndicate.widgets import PrizeImageCard, PrizeQuantityControl
 
 
 class PrizeQuantityControlTests(unittest.TestCase):
@@ -27,12 +29,15 @@ class PrizeQuantityControlTests(unittest.TestCase):
 
     def test_buttons_and_manual_value_are_normalized(self) -> None:
         self.assertEqual(self.control.value(), 1)
+        self.assertEqual(self.control.minus_button.cget("state"), "disabled")
 
         self.control.plus_button.invoke()
         self.assertEqual(self.control.value(), 2)
+        self.assertEqual(self.control.minus_button.cget("state"), "normal")
         self.control.minus_button.invoke()
         self.control.minus_button.invoke()
         self.assertEqual(self.control.value(), 1)
+        self.assertEqual(self.control.minus_button.cget("state"), "disabled")
 
         self.control.quantity_var.set("37")
         self.assertEqual(self.control.value(), 37)
@@ -40,6 +45,14 @@ class PrizeQuantityControlTests(unittest.TestCase):
         self.assertEqual(self.control.value(), 1)
         self.control.set_value(50_000)
         self.assertEqual(self.control.value(), self.control.MAXIMUM)
+
+    def test_step_buttons_highlight_on_hover(self) -> None:
+        event = SimpleNamespace(widget=self.control.plus_button)
+        self.control._on_step_button_enter(event)
+        self.assertEqual(self.control.plus_button.cget("bg"), BUTTON_HOVER)
+
+        self.control._on_step_button_leave(event)
+        self.assertEqual(self.control.plus_button.cget("bg"), SURFACE_LIGHT)
 
     def test_locked_control_keeps_its_colors_and_value(self) -> None:
         self.control.set_value(12)
@@ -53,19 +66,23 @@ class PrizeQuantityControlTests(unittest.TestCase):
         self.assertEqual(self.control.entry.cget("disabledbackground"), normal_background)
         self.assertEqual(self.control.entry.cget("disabledforeground"), normal_foreground)
 
-    def test_controls_are_centered_and_removing_prize_resets_quantity(self) -> None:
+    def test_prize_card_and_control_keep_fixed_heights(self) -> None:
         group = tk.Frame(self.root)
         group.pack()
         control = PrizeQuantityControl(group, value=8)
-        control.grid(row=0, column=0)
         card = PrizeImageCard(group, on_clear=lambda: control.set_value(1))
-        card.grid(row=0, column=1, padx=(4, 0))
+        card.grid(row=0, column=0)
+        control.grid(row=0, column=1, padx=(4, 0))
         card.set_image(Image.new("RGB", (420, 64), "#202521"))
         self.root.update_idletasks()
 
         control_center = control.winfo_y() + control.winfo_height() / 2
         card_center = card.winfo_y() + card.winfo_height() / 2
         self.assertAlmostEqual(control_center, card_center, delta=1)
+        self.assertEqual(control.winfo_width(), control.control_width)
+        self.assertEqual(control.control_width, round(36 * control.ui_scale))
+        self.assertEqual(control.winfo_height(), card.winfo_height())
+        self.assertEqual(card.winfo_height(), card.empty_height)
 
         card.clear()
         self.assertEqual(control.value(), 1)

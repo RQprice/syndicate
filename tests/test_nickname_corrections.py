@@ -3,12 +3,12 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from app import (
+from syndicate.application import WheelApp
+from syndicate.models import (
     NicknameCorrection,
     Participant,
-    ParticipantStore,
-    WheelApp,
 )
+from syndicate.storage import ParticipantStore
 
 
 class NicknameCorrectionTests(unittest.TestCase):

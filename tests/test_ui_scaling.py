@@ -1,6 +1,6 @@
 import unittest
 
-from app import WheelApp
+from syndicate.application import WheelApp
 
 
 class UiScalingTests(unittest.TestCase):
