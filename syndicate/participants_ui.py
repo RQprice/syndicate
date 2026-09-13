@@ -8,10 +8,12 @@ from tkinter import messagebox, ttk
 from .history_ui import DrawHistoryDialog
 from .import_ui import ScreenshotImportDialog
 from .models import (
+    DrawResult,
     LastWinInfo,
     Participant,
     clean_nickname,
     format_bm,
+    format_draw_timestamp,
     format_draws_ago,
     last_win_statistics,
     parse_bm,
@@ -29,7 +31,6 @@ from .theme import (
     BUTTON_HOVER,
     BUTTON_HOVER_BORDER,
     DANGER,
-    DISABLED_TEXT,
     INPUT_BACKGROUND,
     MUTED,
     PANEL_BACKGROUND,
@@ -61,6 +62,8 @@ class ParticipantsPanel(tk.Frame):
         self._bulk_selection = False
         self._clear_focus_after_restore = False
         self._last_win_statistics: dict[str, LastWinInfo] = {}
+        self._last_win_results: dict[str, DrawResult] = {}
+        self._last_win_tooltip: tk.Toplevel | None = None
         self._load_last_win_statistics()
         influence = owner.bm_influence_percent
         influence_text = (
@@ -105,8 +108,14 @@ class ParticipantsPanel(tk.Frame):
         except (OSError, ValueError, TypeError):
             results = []
         self._last_win_statistics = last_win_statistics(results)
+        self._last_win_results = {}
+        for result in reversed(results):
+            key = clean_nickname(result.winner)
+            if key and key not in self._last_win_results:
+                self._last_win_results[key] = result
 
     def refresh_last_wins(self) -> None:
+        self._hide_last_win_tooltip()
         self._load_last_win_statistics()
         for row_data in self.rows:
             self._update_row_last_win(row_data)
@@ -195,7 +204,7 @@ class ParticipantsPanel(tk.Frame):
             column_header.grid_columnconfigure(1, weight=1)
             column_header.grid_columnconfigure(2, minsize=self._px(89))
             column_header.grid_columnconfigure(3, minsize=self._px(1))
-            column_header.grid_columnconfigure(4, minsize=self._px(170))
+            column_header.grid_columnconfigure(4, minsize=self._px(144))
             column_header.grid_columnconfigure(5, minsize=self._px(48))
             tk.Label(
                 column_header,
@@ -355,12 +364,10 @@ class ParticipantsPanel(tk.Frame):
 
     def _update_row_last_win(self, row_data: dict[str, object]) -> None:
         name_var = row_data.get("name")
-        icon = row_data.get("last_win_icon")
         primary = row_data.get("last_win_primary")
         secondary = row_data.get("last_win_secondary")
         if not (
             isinstance(name_var, tk.StringVar)
-            and isinstance(icon, tk.Label)
             and isinstance(primary, tk.Label)
             and isinstance(secondary, tk.Label)
         ):
@@ -368,21 +375,11 @@ class ParticipantsPanel(tk.Frame):
 
         info = self._last_win_statistics.get(clean_nickname(name_var.get()))
         if info is None:
-            icon.configure(
-                text="◷",
-                fg=DISABLED_TEXT,
-                font=("Segoe UI Symbol", 15),
-            )
             primary.configure(text="Никогда", fg=MUTED)
             primary.place(relx=0.0, rely=0.5, anchor="w")
             secondary.place_forget()
             return
 
-        icon.configure(
-            text="🏆",
-            fg=ACCENT_HOVER,
-            font=("Segoe UI Emoji", 13),
-        )
         font_size = 9 if info.draws_ago < 100 else (8 if info.draws_ago < 1000 else 7)
         primary.configure(
             text=format_draws_ago(info.draws_ago),
@@ -391,6 +388,69 @@ class ParticipantsPanel(tk.Frame):
         )
         primary.place(relx=0.0, rely=0.5, anchor="w")
         secondary.place_forget()
+
+    def _show_last_win_tooltip(
+        self, row_data: dict[str, object], event: tk.Event[tk.Misc]
+    ) -> None:
+        name_var = row_data.get("name")
+        if not isinstance(name_var, tk.StringVar):
+            return
+        result = self._last_win_results.get(clean_nickname(name_var.get()))
+        if result is None:
+            return
+
+        self._hide_last_win_tooltip()
+        tooltip = tk.Toplevel(self)
+        tooltip.wm_overrideredirect(True)
+        try:
+            tooltip.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        tooltip.configure(bg=BORDER)
+        details = tk.Frame(
+            tooltip,
+            bg=SURFACE_LIGHT,
+            padx=self._px(10),
+            pady=self._px(7),
+        )
+        details.pack(padx=1, pady=1)
+        tk.Label(
+            details,
+            text=format_draw_timestamp(result.timestamp),
+            bg=SURFACE_LIGHT,
+            fg=MUTED,
+            font=("Segoe UI", 8),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            details,
+            text=result.reward,
+            bg=SURFACE_LIGHT,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 9),
+            anchor="w",
+            justify="left",
+            wraplength=self._px(240),
+        ).pack(fill="x", pady=(self._px(2), 0))
+        tooltip.geometry(
+            f"+{event.x_root + self._px(12)}+{event.y_root + self._px(12)}"
+        )
+        self._last_win_tooltip = tooltip
+
+    def _hide_last_win_tooltip(self) -> None:
+        tooltip = self._last_win_tooltip
+        self._last_win_tooltip = None
+        if tooltip is not None and tooltip.winfo_exists():
+            tooltip.destroy()
+
+    def _hide_last_win_tooltip_if_left(self, last_win: tk.Widget) -> None:
+        pointer_x, pointer_y = self.winfo_pointerxy()
+        widget = self.winfo_containing(pointer_x, pointer_y)
+        while widget is not None:
+            if widget is last_win:
+                return
+            widget = widget.master
+        self._hide_last_win_tooltip()
 
     def _add_row(
         self,
@@ -405,7 +465,7 @@ class ParticipantsPanel(tk.Frame):
         )
         content.pack(fill="x")
         content.grid_columnconfigure(2, weight=1)
-        content.grid_columnconfigure(5, minsize=self._px(166))
+        content.grid_columnconfigure(5, minsize=self._px(140))
         separator = tk.Frame(row, bg="#343B36", height=self._px(1))
         separator.pack(fill="x", padx=self._px(8))
 
@@ -517,7 +577,7 @@ class ParticipantsPanel(tk.Frame):
         last_win = tk.Frame(
             content,
             bg=SURFACE,
-            width=self._px(166),
+            width=self._px(140),
             height=self._px(32),
         )
         last_win.grid(
@@ -528,23 +588,9 @@ class ParticipantsPanel(tk.Frame):
         )
         last_win.grid_propagate(False)
         last_win.grid_rowconfigure(0, weight=1)
-        last_win.grid_columnconfigure(1, weight=1)
-        last_win_icon = tk.Label(
-            last_win,
-            text="◷",
-            bg=SURFACE,
-            fg=DISABLED_TEXT,
-            font=("Segoe UI Symbol", 15),
-        )
-        last_win_icon.grid(
-            row=0,
-            column=0,
-            sticky="nsw",
-            padx=(0, self._px(3)),
-            pady=(0, self._px(2)),
-        )
+        last_win.grid_columnconfigure(0, weight=1)
         last_win_text = tk.Frame(last_win, bg=SURFACE)
-        last_win_text.grid(row=0, column=1, sticky="nsew")
+        last_win_text.grid(row=0, column=0, sticky="nsew")
         last_win_primary = tk.Label(
             last_win_text,
             text="Никогда",
@@ -564,13 +610,30 @@ class ParticipantsPanel(tk.Frame):
             {
                 "last_win": last_win,
                 "last_win_separator": last_win_separator,
-                "last_win_icon": last_win_icon,
                 "last_win_text": last_win_text,
                 "last_win_primary": last_win_primary,
                 "last_win_secondary": last_win_secondary,
             }
         )
         self._update_row_last_win(row_data)
+        for widget in (
+            last_win,
+            last_win_text,
+            last_win_primary,
+            last_win_secondary,
+        ):
+            widget.bind(
+                "<Enter>",
+                lambda event, data=row_data: self._show_last_win_tooltip(data, event),
+                add="+",
+            )
+            widget.bind(
+                "<Leave>",
+                lambda _event, cell=last_win: self.after_idle(
+                    lambda target=cell: self._hide_last_win_tooltip_if_left(target)
+                ),
+                add="+",
+            )
         self.rows.append(row_data)
         self._place_row(row_data, len(self.rows) - 1)
         self._refresh_select_all_state()
@@ -600,7 +663,6 @@ class ParticipantsPanel(tk.Frame):
             bm_entry,
             last_win_separator,
             last_win,
-            last_win_icon,
             last_win_text,
             last_win_primary,
             last_win_secondary,
@@ -630,6 +692,20 @@ class ParticipantsPanel(tk.Frame):
         self._add_row()
 
     def _delete_row(self, row_data: dict[str, object]) -> None:
+        name_var = row_data.get("name")
+        name = name_var.get().strip() if isinstance(name_var, tk.StringVar) else ""
+        participant_caption = f"«{name}»" if name else "этого участника"
+        confirmed = messagebox.askyesno(
+            "Удаление участника",
+            (
+                f"Удалить {participant_caption} из общего списка?\n\n"
+                "Это действие нельзя отменить."
+            ),
+            icon="warning",
+            parent=self,
+        )
+        if not confirmed:
+            return
         frame = row_data["frame"]
         if isinstance(frame, tk.Widget):
             frame.destroy()
@@ -695,7 +771,6 @@ class ParticipantsPanel(tk.Frame):
         delete = row_data.get("delete")
         last_win_widgets = (
             row_data.get("last_win"),
-            row_data.get("last_win_icon"),
             row_data.get("last_win_text"),
             row_data.get("last_win_primary"),
             row_data.get("last_win_secondary"),

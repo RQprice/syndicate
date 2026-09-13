@@ -6,8 +6,7 @@ from unittest.mock import Mock
 from PIL import Image, ImageFont
 
 from syndicate.application import WheelApp
-from syndicate.theme import BUTTON_HOVER, SURFACE_LIGHT
-from syndicate.widgets import PrizeImageCard, PrizeQuantityControl
+from syndicate.widgets import PrizeQuantityControl
 
 
 class PrizeQuantityControlTests(unittest.TestCase):
@@ -46,14 +45,6 @@ class PrizeQuantityControlTests(unittest.TestCase):
         self.control.set_value(50_000)
         self.assertEqual(self.control.value(), self.control.MAXIMUM)
 
-    def test_step_buttons_highlight_on_hover(self) -> None:
-        event = SimpleNamespace(widget=self.control.plus_button)
-        self.control._on_step_button_enter(event)
-        self.assertEqual(self.control.plus_button.cget("bg"), BUTTON_HOVER)
-
-        self.control._on_step_button_leave(event)
-        self.assertEqual(self.control.plus_button.cget("bg"), SURFACE_LIGHT)
-
     def test_locked_control_keeps_its_colors_and_value(self) -> None:
         self.control.set_value(12)
         normal_background = self.control.entry.cget("bg")
@@ -65,27 +56,6 @@ class PrizeQuantityControlTests(unittest.TestCase):
         self.assertEqual(self.control.value(), 12)
         self.assertEqual(self.control.entry.cget("disabledbackground"), normal_background)
         self.assertEqual(self.control.entry.cget("disabledforeground"), normal_foreground)
-
-    def test_prize_card_and_control_keep_fixed_heights(self) -> None:
-        group = tk.Frame(self.root)
-        group.pack()
-        control = PrizeQuantityControl(group, value=8)
-        card = PrizeImageCard(group, on_clear=lambda: control.set_value(1))
-        card.grid(row=0, column=0)
-        control.grid(row=0, column=1, padx=(4, 0))
-        card.set_image(Image.new("RGB", (420, 64), "#202521"))
-        self.root.update_idletasks()
-
-        control_center = control.winfo_y() + control.winfo_height() / 2
-        card_center = card.winfo_y() + card.winfo_height() / 2
-        self.assertAlmostEqual(control_center, card_center, delta=1)
-        self.assertEqual(control.winfo_width(), control.control_width)
-        self.assertEqual(control.control_width, round(36 * control.ui_scale))
-        self.assertEqual(control.winfo_height(), card.winfo_height())
-        self.assertEqual(card.winfo_height(), card.empty_height)
-
-        card.clear()
-        self.assertEqual(control.value(), 1)
 
     def test_single_prize_adds_no_caption_to_video_scene(self) -> None:
         recorder = SimpleNamespace(

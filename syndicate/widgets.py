@@ -536,7 +536,7 @@ class PrizeQuantityControl(tk.Frame):
         )
         self.grid_propagate(False)
         self.grid_columnconfigure(0, weight=1)
-        button_height = max(8, round(21 * self.ui_scale))
+        button_height = max(8, round(22 * self.ui_scale))
         self.grid_rowconfigure(0, minsize=button_height)
         self.grid_rowconfigure(
             1,
