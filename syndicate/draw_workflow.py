@@ -21,13 +21,18 @@ from .models import (
     DrawResult,
     NicknameCorrection,
     Participant,
+    PenaltySettings,
     RecordedWheelFrame,
     clean_nickname,
     nickname_lookup_key,
     sort_participants_by_bm,
 )
+from .penalties import (
+    WinnerPenaltyStatus,
+    advance_penalty_statuses,
+    probabilities_with_penalties,
+)
 from .probabilities import (
-    participant_probabilities,
     participant_weights,
     weighted_random_index,
 )
@@ -160,16 +165,35 @@ class DrawWorkflowMixin:
 
     def _begin_reward_recognition(self, winners: list[str]) -> None:
         generation = self._reward_ocr_generation
-        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
-        self._pending_draw_results = [
-            DrawResult(winner, "", timestamp) for winner in winners
-        ]
+        pending_winners = [item.winner for item in self._pending_draw_results]
+        if pending_winners != winners:
+            timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+            participants = tuple(
+                participant.name
+                for participant in (getattr(self, "_roll_slots", None) or [])
+            )
+            self._pending_draw_results = [
+                DrawResult(
+                    winner,
+                    "",
+                    timestamp,
+                    participants,
+                    getattr(self, "_roll_apply_penalty", True),
+                )
+                for winner in winners
+            ]
         self._roll_logged = False
 
         if self._roll_prize_image is None:
             self._pending_draw_results = [
-                DrawResult(winner, "Награда не указана", timestamp)
-                for winner in winners
+                DrawResult(
+                    item.winner,
+                    "Награда не указана",
+                    item.timestamp,
+                    item.participants,
+                    item.penalty_applied,
+                )
+                for item in self._pending_draw_results
             ]
             self._reward_ocr_pending = False
             self._refresh_result_preparation_state()
@@ -210,7 +234,13 @@ class DrawWorkflowMixin:
                 else "Награда не распознана"
             )
             self._pending_draw_results = [
-                DrawResult(item.winner, reward, item.timestamp)
+                DrawResult(
+                    item.winner,
+                    reward,
+                    item.timestamp,
+                    item.participants,
+                    item.penalty_applied,
+                )
                 for item in pending
             ]
             self._reward_ocr_pending = False
@@ -281,6 +311,7 @@ class DrawWorkflowMixin:
                 list(state.names),
                 list(state.probabilities),
                 state.winner_index,
+                list(state.penalty_coefficients),
             )
             scene = scene_base.copy()
             scene.paste(
@@ -427,6 +458,9 @@ class DrawWorkflowMixin:
         self._winner_index = None
         self._show_winner_glow = False
         self._roll_slots = None
+        self._roll_penalty_statuses = {}
+        self._roll_penalty_coefficients = {}
+        self._roll_apply_penalty = True
         self._roll_remaining = []
         self._roll_probabilities = None
         self._roll_winners = []
@@ -459,6 +493,9 @@ class DrawWorkflowMixin:
         self._roll_logged = False
         self._show_winner_glow = False
         self._roll_slots = None
+        self._roll_penalty_statuses = {}
+        self._roll_penalty_coefficients = {}
+        self._roll_apply_penalty = True
         self._roll_remaining = []
         self._roll_probabilities = None
         self._roll_winners = []
@@ -469,6 +506,15 @@ class DrawWorkflowMixin:
         self.prize_quantity_control.set_locked(False)
         self._update_count()
         self._request_wheel_redraw()
+
+    def set_penalty_settings(self, settings: PenaltySettings) -> None:
+        self.store.save(
+            self.participants,
+            self.bm_influence_percent,
+            self.nickname_corrections,
+            settings,
+        )
+        self.penalty_settings = settings
 
     def corrected_nickname(self, recognized_name: str) -> str:
         key = nickname_lookup_key(recognized_name)
@@ -567,6 +613,19 @@ class DrawWorkflowMixin:
         )
         self._roll_prize_quantity = winner_count
         self._roll_target_count = winner_count
+        self._roll_apply_penalty = (
+            self.penalty_settings.enabled
+            and self.participants_panel.apply_penalty_var.get()
+        )
+        self._roll_penalty_statuses = (
+            self.participants_panel.active_penalty_statuses()
+            if self._roll_apply_penalty
+            else {}
+        )
+        self._roll_penalty_coefficients = {
+            name: status.coefficient
+            for name, status in self._roll_penalty_statuses.items()
+        }
         self._roll_slots = list(active)
         self._roll_remaining = list(active)
         self._roll_winners = []
@@ -591,15 +650,25 @@ class DrawWorkflowMixin:
     def _mapped_roll_probabilities(
         self,
         pool: list[Participant],
+        penalty_coefficients: dict[str, float] | None = None,
     ) -> list[float]:
         if self._roll_slots is None:
             return []
         if not pool:
             return [0.0] * len(self._roll_slots)
-        pool_probabilities = participant_probabilities(
+        pool_weights = participant_weights(
             pool,
             self.bm_influence_percent,
             self.participants,
+        )
+        pool_probabilities = probabilities_with_penalties(
+            pool,
+            pool_weights,
+            (
+                self._roll_penalty_coefficients
+                if penalty_coefficients is None
+                else penalty_coefficients
+            ),
         )
         probability_by_identity = {
             id(participant): probability
@@ -628,6 +697,11 @@ class DrawWorkflowMixin:
             self.bm_influence_percent,
             self.participants,
         )
+        weights = probabilities_with_penalties(
+            pool,
+            weights,
+            self._roll_penalty_coefficients,
+        )
         pool_winner_index = weighted_random_index(weights)
         winner_participant = pool[pool_winner_index]
         winner_slot_index = next(
@@ -653,6 +727,13 @@ class DrawWorkflowMixin:
 
         video_frame_count = max(1, math.ceil(duration * self.VIDEO_FPS))
         slot_names = tuple(participant.name for participant in slots)
+        slot_penalties = tuple(
+            self._roll_penalty_coefficients.get(
+                clean_nickname(participant.name),
+                1.0,
+            )
+            for participant in slots
+        )
         probability_tuple = tuple(probabilities)
         for frame_index in range(video_frame_count + 1):
             progress = frame_index / video_frame_count
@@ -663,6 +744,7 @@ class DrawWorkflowMixin:
                     frame_rotation,
                     slot_names,
                     probability_tuple,
+                    penalty_coefficients=slot_penalties,
                 )
             )
 
@@ -671,7 +753,25 @@ class DrawWorkflowMixin:
             for participant in pool
             if participant is not winner_participant
         ]
-        end_probabilities = self._mapped_roll_probabilities(remaining)
+        round_participants = tuple(participant.name for participant in pool)
+        next_penalty_statuses = (
+            advance_penalty_statuses(
+                self._roll_penalty_statuses,
+                round_participants,
+                winner_participant.name,
+                self.penalty_settings,
+            )
+            if self._roll_apply_penalty
+            else {}
+        )
+        next_penalty_coefficients = {
+            name: status.coefficient
+            for name, status in next_penalty_statuses.items()
+        }
+        end_probabilities = self._mapped_roll_probabilities(
+            remaining,
+            next_penalty_coefficients,
+        )
         transition_steps = max(
             2,
             round(self.SECTOR_TRANSITION_SECONDS * self.VIDEO_FPS) + 1,
@@ -723,6 +823,9 @@ class DrawWorkflowMixin:
                 winner_slot_index,
                 probabilities,
                 remaining,
+                round_participants,
+                next_penalty_statuses,
+                next_penalty_coefficients,
                 transition_probabilities,
                 transition_discs,
             )
@@ -735,6 +838,9 @@ class DrawWorkflowMixin:
         winner_slot_index: int,
         probabilities: list[float],
         remaining: list[Participant],
+        round_participants: tuple[str, ...],
+        next_penalty_statuses: dict[str, WinnerPenaltyStatus],
+        next_penalty_coefficients: dict[str, float],
         transition_probabilities: list[list[float]],
         transition_discs: queue.Queue[list[Image.Image] | Exception],
     ) -> None:
@@ -742,17 +848,36 @@ class DrawWorkflowMixin:
         if slots is None:
             return
         self._roll_winners.append(winner.name)
+        self._pending_draw_results.append(
+            DrawResult(
+                winner.name,
+                "",
+                datetime.now().astimezone().isoformat(timespec="seconds"),
+                round_participants,
+                self._roll_apply_penalty,
+            )
+        )
         self._winner_index = winner_slot_index
         self._show_winner_glow = True
         self._draw_wheel()
 
         names = tuple(participant.name for participant in slots)
+        penalties = tuple(
+            self._roll_penalty_coefficients.get(
+                clean_nickname(participant.name),
+                1.0,
+            )
+            for participant in slots
+        )
         highlighted_state = RecordedWheelFrame(
             self.rotation,
             names,
             tuple(probabilities),
             winner_slot_index,
+            penalties,
         )
+        self._roll_penalty_statuses = next_penalty_statuses
+        self._roll_penalty_coefficients = next_penalty_coefficients
         if self._roll_target_count > 1:
             hold_frames = max(
                 1,
@@ -801,6 +926,13 @@ class DrawWorkflowMixin:
         if slots is None:
             return
         names = tuple(participant.name for participant in slots)
+        penalties = tuple(
+            self._roll_penalty_coefficients.get(
+                clean_nickname(participant.name),
+                1.0,
+            )
+            for participant in slots
+        )
         self._show_winner_glow = False
         self._winner_index = None
         self._video_frames.extend(
@@ -808,6 +940,7 @@ class DrawWorkflowMixin:
                 self.rotation,
                 names,
                 tuple(values),
+                penalty_coefficients=penalties,
             )
             for values in transition_probabilities
         )

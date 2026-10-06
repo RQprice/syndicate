@@ -10,6 +10,7 @@ from syndicate.application import WheelApp
 from syndicate.models import (
     DrawResult,
     LastWinInfo,
+    Participant,
     format_draw_timestamp,
     format_draws_ago,
     last_win_statistics,
@@ -26,6 +27,7 @@ class DrawLogStoreTests(unittest.TestCase):
                 "лена",
                 "Книга запретных знаний мастера",
                 "2026-08-14T12:30:00+03:00",
+                ("лена", "Другой игрок"),
             )
             second = DrawResult(
                 "ネリエル",
@@ -38,9 +40,185 @@ class DrawLogStoreTests(unittest.TestCase):
 
             self.assertEqual(store.load(), [first, second])
             raw = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(raw["version"], 1)
+            self.assertEqual(raw["version"], 3)
             self.assertEqual(raw["draws"][0]["winner"], "лена")
+            self.assertEqual(
+                raw["draws"][0]["participants"],
+                ["лена", "Другой игрок"],
+            )
             self.assertEqual(raw["draws"][1]["winner"], "ネリエル")
+
+    def test_loads_legacy_results_without_participant_history(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "draw_log.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "draws": [
+                            {
+                                "winner": "Player",
+                                "reward": "Prize",
+                                "timestamp": "2026-01-01T20:00:00+03:00",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                DrawLogStore(path).load(),
+                [
+                    DrawResult(
+                        "Player",
+                        "Prize",
+                        "2026-01-01T20:00:00+03:00",
+                        penalty_applied=False,
+                    )
+                ],
+            )
+
+    def test_migrates_legacy_log_to_current_version_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "draw_log.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "draws": [
+                            {
+                                "winner": "Player",
+                                "reward": "Prize",
+                                "timestamp": "2026-01-01T20:00:00+03:00",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store = DrawLogStore(path)
+
+            self.assertTrue(store.migrate())
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["version"], 3)
+            self.assertEqual(payload["draws"][0]["participants"], [])
+            self.assertFalse(payload["draws"][0]["penalty_applied"])
+            self.assertFalse(store.migrate())
+
+    def test_version_two_records_become_neutral_during_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "draw_log.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "draws": [
+                            {
+                                "winner": "Player",
+                                "reward": "Prize",
+                                "timestamp": "2026-01-01T20:00:00+03:00",
+                                "participants": ["Player", "Other"],
+                                "penalty_applied": True,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store = DrawLogStore(path)
+
+            self.assertTrue(store.migrate())
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["version"], 3)
+            self.assertFalse(payload["draws"][0]["penalty_applied"])
+            self.assertFalse(store.load()[0].penalty_applied)
+
+    def test_migration_does_not_overwrite_malformed_log(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "draw_log.json"
+            original = '{"version": 1, "draws": "invalid"}'
+            path.write_text(original, encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                DrawLogStore(path).migrate()
+
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+    def test_migration_preserves_unknown_fields_and_unreadable_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "draw_log.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "custom": "keep me",
+                        "draws": [
+                            {
+                                "winner": "Player",
+                                "reward": "Prize",
+                                "timestamp": "2026-01-01T20:00:00+03:00",
+                                "custom_draw_field": 42,
+                            },
+                            "unreadable row",
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            DrawLogStore(path).migrate()
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["custom"], "keep me")
+            self.assertEqual(payload["draws"][0]["custom_draw_field"], 42)
+            self.assertEqual(payload["draws"][0]["participants"], [])
+            self.assertFalse(payload["draws"][0]["penalty_applied"])
+            self.assertEqual(payload["draws"][1], "unreadable row")
+
+    def test_migration_repairs_old_multi_winner_participant_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "draw_log.json"
+            participants = ["A", "B", "C", "D"]
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "draws": [
+                            {
+                                "winner": winner,
+                                "reward": "Prize",
+                                "timestamp": "2026-10-02T20:53:43+03:00",
+                                "participants": participants,
+                            }
+                            for winner in ("A", "B", "C")
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store = DrawLogStore(path)
+
+            self.assertTrue(store.migrate())
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["participants"] for item in payload["draws"]],
+                [
+                    ["A", "B", "C", "D"],
+                    ["B", "C", "D"],
+                    ["C", "D"],
+                ],
+            )
+            self.assertTrue(
+                all(
+                    not item["penalty_applied"]
+                    for item in payload["draws"]
+                )
+            )
+            self.assertFalse(store.migrate())
 
     def test_missing_log_is_an_empty_history(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -62,6 +240,23 @@ class DrawLogStoreTests(unittest.TestCase):
 
             self.assertEqual(store.load(), results)
 
+    def test_round_can_be_saved_as_neutral_for_penalty_history(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "draw_log.json"
+            result = DrawResult(
+                "Player",
+                "Prize",
+                "2026-10-02T20:00:00+03:00",
+                ("Player", "Other"),
+                penalty_applied=False,
+            )
+
+            DrawLogStore(path).append(result)
+
+            self.assertEqual(DrawLogStore(path).load(), [result])
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertFalse(payload["draws"][0]["penalty_applied"])
+
     def test_application_commits_each_winner_as_its_own_row(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = DrawLogStore(Path(folder) / "draw_log.json")
@@ -70,6 +265,11 @@ class DrawLogStoreTests(unittest.TestCase):
                 _roll_prize_image=None,
                 _pending_draw_results=[],
                 _roll_logged=False,
+                _roll_slots=[
+                    Participant("Pjanka"),
+                    Participant("XmelON"),
+                    Participant("Asper"),
+                ],
                 _reward_ocr_pending=False,
                 _refresh_result_preparation_state=Mock(),
                 draw_log_store=store,
@@ -87,6 +287,12 @@ class DrawLogStoreTests(unittest.TestCase):
                 all(item.reward == "Награда не указана" for item in results)
             )
             self.assertEqual(results[0].timestamp, results[1].timestamp)
+            self.assertTrue(
+                all(
+                    item.participants == ("Pjanka", "XmelON", "Asper")
+                    for item in results
+                )
+            )
 
     def test_remove_at_deletes_only_the_selected_record(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -134,6 +340,56 @@ class DrawLogStoreTests(unittest.TestCase):
 
         self.assertEqual(statistics["XmelON"], LastWinInfo(2, 2))
         self.assertEqual(statistics["Xmelon"], LastWinInfo(1, 1))
+
+    def test_last_win_age_counts_only_draws_attended_by_that_player(self) -> None:
+        results = [
+            DrawResult(
+                "A",
+                "Prize 1",
+                "2026-09-01T20:00:00+03:00",
+                ("A", "B"),
+            ),
+            DrawResult(
+                "B",
+                "Prize 2",
+                "2026-09-02T20:00:00+03:00",
+                ("B", "C"),
+            ),
+            DrawResult(
+                "C",
+                "Prize 3",
+                "2026-09-03T20:00:00+03:00",
+                ("A", "C"),
+            ),
+            DrawResult(
+                "D",
+                "Prize 4",
+                "2026-09-04T20:00:00+03:00",
+                ("C", "D"),
+            ),
+        ]
+
+        statistics = last_win_statistics(results, date(2026, 9, 5))
+
+        self.assertEqual(statistics["A"], LastWinInfo(2, 4))
+        self.assertEqual(statistics["B"], LastWinInfo(1, 3))
+        self.assertEqual(statistics["C"], LastWinInfo(2, 2))
+        self.assertEqual(statistics["D"], LastWinInfo(1, 1))
+
+    def test_legacy_last_win_age_keeps_global_count(self) -> None:
+        results = [
+            DrawResult("A", "Old prize", "2026-09-01T20:00:00+03:00"),
+            DrawResult(
+                "B",
+                "New prize",
+                "2026-09-02T20:00:00+03:00",
+                ("B", "C"),
+            ),
+        ]
+
+        statistics = last_win_statistics(results, date(2026, 9, 3))
+
+        self.assertEqual(statistics["A"], LastWinInfo(2, 2))
 
     def test_draw_age_uses_correct_russian_word_form(self) -> None:
         self.assertEqual(format_draws_ago(1), "1 розыгрыш назад")

@@ -1,11 +1,12 @@
 import unittest
-from types import SimpleNamespace
+import tkinter as tk
 from unittest.mock import Mock, patch
 
+from syndicate.models import Participant
 from syndicate.participants_ui import ParticipantsPanel
 
 
-class ParticipantsPanelDeletionTests(unittest.TestCase):
+class ParticipantsPanelTests(unittest.TestCase):
     def setUp(self) -> None:
         self.panel = ParticipantsPanel.__new__(ParticipantsPanel)
         self.row = {"frame": object(), "name": None}
@@ -33,6 +34,34 @@ class ParticipantsPanelDeletionTests(unittest.TestCase):
         self.assertEqual(self.panel.rows, [])
         self.panel._reflow_rows.assert_called_once()
         self.panel._schedule_auto_save.assert_called_once_with(0)
+
+    def test_import_merges_duplicate_corrected_names(self) -> None:
+        interpreter = tk.Tcl()
+        panel = ParticipantsPanel.__new__(ParticipantsPanel)
+        panel.rows = []
+        panel._schedule_auto_save = Mock()
+
+        def add_row(name: str, _enabled: bool, bm: float) -> None:
+            panel.rows.append(
+                {
+                    "name": tk.StringVar(master=interpreter, value=name),
+                    "bm": tk.StringVar(master=interpreter, value=str(bm)),
+                }
+            )
+
+        panel._add_row = add_row
+        panel.apply_import(
+            [
+                Participant("Лена", False, 100.0),
+                Participant("лЕНа", False, 250.0),
+            ]
+        )
+
+        self.assertEqual(len(panel.rows), 1)
+        bm_var = panel.rows[0]["bm"]
+        self.assertIsInstance(bm_var, tk.StringVar)
+        assert isinstance(bm_var, tk.StringVar)
+        self.assertEqual(bm_var.get(), "250")
 
 
 if __name__ == "__main__":

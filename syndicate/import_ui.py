@@ -29,6 +29,7 @@ from .platform import (
 )
 from .theme import (
     ACCENT,
+    ACCENT_HOVER,
     APP_NAME,
     BACKGROUND,
     BORDER,
@@ -46,6 +47,30 @@ from .theme import (
     TEXT_BRIGHT,
 )
 from .widgets import AnimatedEllipsis, StyledDeleteButton, styled_button
+
+
+def parse_clipboard_participants(text: str) -> list[RecognizedParticipant]:
+    """Extract nickname and BM from copied guild-table rows.
+
+    The game table uses tab-separated columns where the nickname is third and
+    BM is fifth.  Other columns, including the online status, are ignored.
+    """
+
+    participants: list[RecognizedParticipant] = []
+    for line in text.splitlines():
+        columns = line.split("\t")
+        if len(columns) < 5:
+            continue
+        name = clean_nickname(columns[2])
+        # ``split`` removes ordinary, non-breaking and narrow non-breaking
+        # spaces used as thousands separators in copied game tables.
+        bm_text = "".join(columns[4].split())
+        if not name or not bm_text.isdecimal():
+            continue
+        participants.append(
+            RecognizedParticipant(name, int(bm_text), confidence=100.0)
+        )
+    return participants
 
 
 class NicknameCorrectionsDialog(tk.Toplevel):
@@ -392,6 +417,10 @@ class ScreenshotImportDialog(tk.Toplevel):
             header, "Вставить скриншот", self._paste, SURFACE_LIGHT, TEXT
         )
         self.paste_button.pack(side="right")
+        self.paste_text_button = styled_button(
+            header, "Вставить текст", self._paste_text, SURFACE_LIGHT, TEXT
+        )
+        self.paste_text_button.pack(side="right", padx=(0, self._px(8)))
         self.corrections_button = styled_button(
             header, "⇆", self._open_corrections, SURFACE_LIGHT, TEXT
         )
@@ -456,6 +485,32 @@ class ScreenshotImportDialog(tk.Toplevel):
         self._show_screenshot_view()
         return "break"
 
+    def _paste_text(self) -> str:
+        if self.busy:
+            return "break"
+        try:
+            clipboard_text = self.clipboard_get()
+        except tk.TclError:
+            clipboard_text = ""
+        recognized = parse_clipboard_participants(str(clipboard_text))
+        if not recognized:
+            messagebox.showwarning(
+                APP_NAME,
+                (
+                    "В буфере не найдены строки списка гильдии. "
+                    "Ожидаются табличные данные с ником и БМ."
+                ),
+                parent=self,
+            )
+            return "break"
+
+        self._show_results()
+        for participant in recognized:
+            self._merge_or_add(participant)
+        self.status_var.set(f"· {len(self.rows)}")
+        self.action_button.configure(state="normal" if self.rows else "disabled")
+        return "break"
+
     def _on_control_keypress(self, event: tk.Event[tk.Misc]) -> str | None:
         if isinstance(event.widget, (tk.Entry, ttk.Entry)):
             return None
@@ -510,10 +565,12 @@ class ScreenshotImportDialog(tk.Toplevel):
 
         for index, screenshot in enumerate(self.screenshots):
             self._add_thumbnail(screenshot, index)
+        self._add_paste_card(len(self.screenshots))
 
         count = len(self.screenshots)
         self.status_var.set(f"· {count}" if count else "")
         self.paste_button.configure(state="normal", text="Вставить скриншот")
+        self.paste_text_button.configure(state="normal")
         self.corrections_button.configure(state="normal")
         self.action_button.configure(
             text="Распознать",
@@ -603,6 +660,71 @@ class ScreenshotImportDialog(tk.Toplevel):
         )
         card.bind("<MouseWheel>", self._scroll)
 
+    def _add_paste_card(self, index: int) -> None:
+        """Add the persistent clipboard-import card after the screenshots."""
+
+        card = tk.Canvas(
+            self.content_frame,
+            width=self.thumbnail_width,
+            height=self.thumbnail_height,
+            bg=SURFACE_LIGHT,
+            highlightthickness=0,
+            borderwidth=0,
+            cursor="hand2",
+            takefocus=1,
+        )
+        card.grid(
+            row=index // 2,
+            column=index % 2,
+            padx=self._px(8),
+            pady=self._px(8),
+        )
+
+        def redraw(hovered: bool = False, focused: bool = False) -> None:
+            card.delete("all")
+            border = BORDER_LIGHT if hovered or focused else BUTTON_BORDER
+            plus_color = ACCENT_HOVER if hovered or focused else MUTED
+            center_x = self.thumbnail_width // 2
+            center_y = self.thumbnail_height // 2
+            card.create_rectangle(
+                1,
+                1,
+                self.thumbnail_width - self._px(1),
+                self.thumbnail_height - self._px(1),
+                outline=border,
+                width=self._px(2),
+            )
+            card.create_line(
+                center_x - self._px(16),
+                center_y,
+                center_x + self._px(16),
+                center_y,
+                fill=plus_color,
+                width=self._px(3),
+                capstyle="round",
+            )
+            card.create_line(
+                center_x,
+                center_y - self._px(16),
+                center_x,
+                center_y + self._px(16),
+                fill=plus_color,
+                width=self._px(3),
+                capstyle="round",
+            )
+
+        redraw()
+        card.bind("<Enter>", lambda _event: redraw(hovered=True))
+        card.bind("<Leave>", lambda _event: redraw())
+        card.bind(
+            "<FocusIn>", lambda _event: redraw(focused=True)
+        )
+        card.bind("<FocusOut>", lambda _event: redraw())
+        card.bind("<Button-1>", self._paste)
+        card.bind("<Return>", self._paste)
+        card.bind("<space>", self._paste)
+        card.bind("<MouseWheel>", self._scroll)
+
     def _delete_screenshot(self, screenshot: Image.Image) -> None:
         if self.busy:
             return
@@ -617,6 +739,7 @@ class ScreenshotImportDialog(tk.Toplevel):
             return
         self.busy = True
         self.paste_button.configure(state="disabled")
+        self.paste_text_button.configure(state="disabled")
         self.corrections_button.configure(state="disabled")
         self.action_button.configure(state="disabled")
         self.loading_text.start(self.action_button, "Распознавание")
@@ -673,6 +796,7 @@ class ScreenshotImportDialog(tk.Toplevel):
         self.rows.clear()
         self._clear_content()
         self.paste_button.configure(state="normal", text="Вставить скриншот")
+        self.paste_text_button.configure(state="normal")
         self.corrections_button.configure(state="normal")
         self.action_button.configure(
             text="Добавить",

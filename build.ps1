@@ -22,6 +22,13 @@ if (-not (Test-Path (Join-Path $rapidModelsDir "ch_PP-OCRv5_rec_mobile.onnx"))) 
     Write-Host "Bundled neural OCR models not found: $rapidModelsDir"
     exit 1
 }
+$rapidOcrPackageDir = py -c "from pathlib import Path; import rapidocr; print(Path(rapidocr.__file__).resolve().parent)"
+$rapidOcrConfig = Join-Path $rapidOcrPackageDir "config.yaml"
+$rapidOcrDefaultModels = Join-Path $rapidOcrPackageDir "default_models.yaml"
+if (-not (Test-Path $rapidOcrConfig) -or -not (Test-Path $rapidOcrDefaultModels)) {
+    Write-Host "RapidOCR package data not found: $rapidOcrPackageDir"
+    exit 1
+}
 
 $guildIconPng = Join-Path $PSScriptRoot "imgs\guild icon.png"
 $appIconPng = Join-Path $PSScriptRoot "imgs\guild app icon.png"
@@ -47,11 +54,21 @@ if (-not (Test-Path $dataFile)) {
 pyinstaller --noconfirm --clean --onefile --windowed `
     --add-data "$tesseractDir;tesseract" `
     --add-data "$rapidModelsDir;rapidocr_models" `
+    --add-data "$rapidOcrConfig;rapidocr" `
+    --add-data "$rapidOcrDefaultModels;rapidocr" `
     --add-data "$guildIconPng;imgs" `
     --add-data "$appIconPng;imgs" `
     --add-data "$appIconIco;imgs" `
     --icon "$appIconIco" `
-    --collect-data rapidocr `
+    --exclude-module torch `
+    --exclude-module torchvision `
+    --exclude-module torchaudio `
+    --exclude-module transformers `
+    --exclude-module sentence_transformers `
+    --exclude-module sklearn `
+    --exclude-module scipy `
+    --exclude-module tensorflow `
+    --exclude-module pandas `
     --name $appName app.py
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"

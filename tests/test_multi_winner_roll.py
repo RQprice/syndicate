@@ -1,12 +1,67 @@
 import time
 import unittest
 from unittest.mock import Mock
+from unittest.mock import patch
 
 from syndicate.application import WheelApp
-from syndicate.models import Participant
+from syndicate.models import Participant, PenaltySettings
+from syndicate.penalties import WinnerPenaltyStatus
 
 
 class MultiWinnerRollTests(unittest.TestCase):
+    def test_penalty_recovers_between_spins_in_a_multi_winner_series(self) -> None:
+        app = WheelApp()
+        app.withdraw()
+        try:
+            app.participants = [
+                Participant("A", True, 100),
+                Participant("B", True, 200),
+                Participant("C", True, 300),
+                Participant("D", True, 400),
+            ]
+            app.penalty_settings = PenaltySettings()
+            app.participants_panel.flush_auto_save = Mock()
+            app.participants_panel.set_editing_enabled = Mock()
+            app.participants_panel.active_penalty_statuses = Mock(
+                return_value={"A": WinnerPenaltyStatus(0.25, 4)}
+            )
+            app.prize_quantity_control.set_value(3)
+            app.MULTI_SPIN_DURATION_SECONDS = 0.03
+            app.MULTI_WINNER_HOLD_SECONDS = 0.01
+            app.SECTOR_TRANSITION_SECONDS = 0.01
+            app.VIDEO_FPS = 4
+            app.DISC_ANTIALIAS_SCALE = 1
+            app._begin_reward_recognition = Mock()
+            app._begin_video_generation = Mock()
+
+            # B, then C, then D win; penalized A participates in every spin.
+            with patch(
+                "syndicate.draw_workflow.weighted_random_index",
+                side_effect=(1, 1, 1),
+            ):
+                app._start_spin()
+                deadline = time.monotonic() + 5
+                while app.spinning and time.monotonic() < deadline:
+                    app.update()
+                    time.sleep(0.002)
+
+            self.assertFalse(app.spinning)
+            self.assertEqual(app._roll_winners, ["B", "C", "D"])
+            self.assertEqual(
+                app._roll_penalty_statuses["A"],
+                WinnerPenaltyStatus(0.8, 1),
+            )
+            recorded_a_coefficients = {
+                frame.penalty_coefficients[0]
+                for frame in app._video_frames
+                if frame.penalty_coefficients
+            }
+            self.assertTrue(
+                {0.25, 0.4, 0.6}.issubset(recorded_a_coefficients)
+            )
+        finally:
+            app.destroy()
+
     def test_multiple_prizes_choose_unique_winners_and_cancel_restores_pool(self) -> None:
         app = WheelApp()
         app.withdraw()
@@ -46,6 +101,23 @@ class MultiWinnerRollTests(unittest.TestCase):
             self.assertEqual(recognized_winners, app._roll_winners)
             self.assertEqual(recorded_winners, app._roll_winners)
             self.assertEqual(app.result_var.get(), " | ".join(app._roll_winners))
+            self.assertEqual(len(app._pending_draw_results), 3)
+            self.assertTrue(
+                all(
+                    result.penalty_applied
+                    for result in app._pending_draw_results
+                )
+            )
+            self.assertEqual(
+                [
+                    len(result.participants)
+                    for result in app._pending_draw_results
+                ],
+                [4, 3, 2],
+            )
+            for index, result in enumerate(app._pending_draw_results):
+                for previous_winner in app._roll_winners[:index]:
+                    self.assertNotIn(previous_winner, result.participants)
             original_winner_order = list(app._roll_winners)
             bm_by_name = {
                 participant.name: participant.bm

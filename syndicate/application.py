@@ -84,9 +84,15 @@ class WheelApp(DrawWorkflowMixin, WheelRenderingMixin, tk.Tk):
             self.attributes("-alpha", 0.0)
         self.store = ParticipantStore()
         self.draw_log_store = DrawLogStore()
+        try:
+            self.draw_log_store.migrate()
+        except (OSError, ValueError, TypeError):
+            # A damaged or read-only history must not prevent the app opening.
+            pass
         self.participants = sort_participants_by_bm(self.store.load())
         self.bm_influence_percent = self.store.bm_influence_percent
         self.nickname_corrections = list(self.store.nickname_corrections)
+        self.penalty_settings = self.store.penalty_settings
         self.rotation = 0.0
         self.spinning = False
         self._winner_index: int | None = None
@@ -94,6 +100,9 @@ class WheelApp(DrawWorkflowMixin, WheelRenderingMixin, tk.Tk):
         self._roll_slots: list[Participant] | None = None
         self._roll_remaining: list[Participant] = []
         self._roll_probabilities: list[float] | None = None
+        self._roll_penalty_statuses = {}
+        self._roll_penalty_coefficients: dict[str, float] = {}
+        self._roll_apply_penalty = True
         self._roll_winners: list[str] = []
         self._roll_target_count = 1
         self._wheel_cache_key: tuple[float, ...] | None = None

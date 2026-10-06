@@ -13,7 +13,12 @@ import numpy as np
 from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageTk
 
 from .platform import resource_path
-from .probabilities import participant_probabilities
+from .models import clean_nickname
+from .penalties import (
+    format_probability_with_penalty,
+    probabilities_with_penalties,
+)
+from .probabilities import participant_weights
 from .theme import (
     ACCENT,
     ACCENT_DARK,
@@ -44,10 +49,19 @@ class WheelRenderingMixin:
         if self._roll_slots is not None and self._roll_probabilities is not None:
             active = self._roll_slots
             probabilities = self._roll_probabilities
+            penalty_coefficients = self._roll_penalty_coefficients
         else:
             active = self.active_participants
-            probabilities = participant_probabilities(
+            penalty_coefficients = (
+                self.participants_panel.selected_penalty_coefficients()
+            )
+            weights = participant_weights(
                 active, self.bm_influence_percent, self.participants
+            )
+            probabilities = probabilities_with_penalties(
+                active,
+                weights,
+                penalty_coefficients,
             )
         cx, cy, radius = self.CENTER_X, self.CENTER_Y, self.RADIUS
 
@@ -120,7 +134,14 @@ class WheelRenderingMixin:
                 label = label[: limit - 1] + "…"
             name_size = 10 if len(active) <= 20 else 9
             probability_size = 9 if len(active) <= 12 else 8
-            probability_text = f"{probabilities[index] * 100:.2f}%"
+            coefficient = penalty_coefficients.get(
+                clean_nickname(participant.name),
+                1.0,
+            )
+            probability_text = format_probability_with_penalty(
+                probabilities[index],
+                coefficient,
+            )
             if not self.spinning:
                 canvas.create_text(
                     x + self._px(1),
@@ -306,6 +327,7 @@ class WheelRenderingMixin:
         names: list[str],
         probabilities: list[float],
         winner_index: int | None = None,
+        penalty_coefficients: list[float] | None = None,
     ) -> Image.Image:
         image = background.copy()
         disc_height, disc_width = disc_array.shape[:2]
@@ -370,7 +392,13 @@ class WheelRenderingMixin:
             )
             label_draw.text(
                 (x, y + 9),
-                f"{probabilities[index] * 100:.2f}%",
+                format_probability_with_penalty(
+                    probabilities[index],
+                    penalty_coefficients[index]
+                    if penalty_coefficients
+                    and index < len(penalty_coefficients)
+                    else 1.0,
+                ),
                 fill=TEXT_BRIGHT,
                 font=probability_font,
                 anchor="mm",
@@ -508,8 +536,13 @@ class WheelRenderingMixin:
 
     def _request_wheel_redraw(self) -> None:
         active = self.active_participants
-        probabilities = participant_probabilities(
+        weights = participant_weights(
             active, self.bm_influence_percent, self.participants
+        )
+        probabilities = probabilities_with_penalties(
+            active,
+            weights,
+            self.participants_panel.selected_penalty_coefficients(),
         )
         cache_key = tuple(round(value, 12) for value in probabilities)
 

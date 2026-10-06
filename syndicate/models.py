@@ -23,6 +23,18 @@ class DrawResult:
     winner: str
     reward: str
     timestamp: str
+    participants: tuple[str, ...] = ()
+    penalty_applied: bool = True
+
+
+@dataclass(frozen=True)
+class PenaltySettings:
+    enabled: bool = True
+    chance_steps: tuple[float, ...] = (0.25, 0.40, 0.60, 0.80, 1.0)
+
+    @property
+    def recovery_participations(self) -> int:
+        return max(1, len(self.chance_steps) - 1)
 
 
 @dataclass(frozen=True)
@@ -37,6 +49,7 @@ class RecordedWheelFrame:
     names: tuple[str, ...]
     probabilities: tuple[float, ...]
     winner_index: int | None = None
+    penalty_coefficients: tuple[float, ...] = ()
 
 
 def clean_nickname(name: str) -> str:
@@ -79,18 +92,32 @@ def last_win_statistics(
     results: list[DrawResult],
     today: date | None = None,
 ) -> dict[str, LastWinInfo]:
-    """Return the latest win age for each exact, whitespace-cleaned name.
+    """Return each player's latest win age in their own attended draws.
 
-    The most recently appended history entry is draw number one. Each entry
-    is counted independently, even when several entries share a timestamp.
+    Version 1 rows have no participant snapshot, so their latest wins retain
+    the legacy global-row count instead of presenting an invented attendance
+    count.
     """
 
     reference_day = today or datetime.now().astimezone().date()
     statistics: dict[str, LastWinInfo] = {}
-    for draws_ago, result in enumerate(reversed(results), start=1):
+    attended_draws: dict[str, int] = {}
+    for global_draws_ago, result in enumerate(reversed(results), start=1):
+        participants = {
+            clean_nickname(name)
+            for name in result.participants
+            if clean_nickname(name)
+        }
+        for participant in participants:
+            attended_draws[participant] = attended_draws.get(participant, 0) + 1
         key = clean_nickname(result.winner)
         if not key or key in statistics:
             continue
+        draws_ago = (
+            attended_draws[key]
+            if key in participants
+            else global_draws_ago
+        )
         won_on = draw_result_date(result.timestamp)
         days_ago = (
             max(0, (reference_day - won_on).days)

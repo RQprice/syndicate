@@ -11,14 +11,23 @@ from .models import (
     DrawResult,
     LastWinInfo,
     Participant,
+    PenaltySettings,
     clean_nickname,
     format_bm,
     format_draw_timestamp,
     format_draws_ago,
     last_win_statistics,
+    nickname_lookup_key,
     parse_bm,
     sort_participants_by_bm,
 )
+from .penalties import (
+    WinnerPenaltyStatus,
+    format_penalty_coefficient,
+    format_remaining_draws,
+    winner_penalty_statuses,
+)
+from .penalty_ui import PenaltySettingsDialog
 from .platform import enable_entry_shortcuts, scaled_px, widget_ui_scale
 from .theme import (
     ACCENT,
@@ -54,6 +63,8 @@ class ParticipantsPanel(tk.Frame):
         self.rows: list[dict[str, object]] = []
         self.import_dialog: ScreenshotImportDialog | None = None
         self.history_dialog: DrawHistoryDialog | None = None
+        self.penalty_dialog: PenaltySettingsDialog | None = None
+        self.penalty_settings = owner.penalty_settings
         self._auto_save_ready = False
         self._auto_save_after_id: str | None = None
         self._save_pending = False
@@ -63,7 +74,10 @@ class ParticipantsPanel(tk.Frame):
         self._clear_focus_after_restore = False
         self._last_win_statistics: dict[str, LastWinInfo] = {}
         self._last_win_results: dict[str, DrawResult] = {}
+        self._penalty_statuses: dict[str, WinnerPenaltyStatus] = {}
         self._last_win_tooltip: tk.Toplevel | None = None
+        self._last_win_tooltip_anchor: tk.Widget | None = None
+        self._last_win_tooltip_hide_job: str | None = None
         self._load_last_win_statistics()
         influence = owner.bm_influence_percent
         influence_text = (
@@ -108,6 +122,10 @@ class ParticipantsPanel(tk.Frame):
         except (OSError, ValueError, TypeError):
             results = []
         self._last_win_statistics = last_win_statistics(results)
+        self._penalty_statuses = winner_penalty_statuses(
+            results,
+            self.penalty_settings,
+        )
         self._last_win_results = {}
         for result in reversed(results):
             key = clean_nickname(result.winner)
@@ -119,6 +137,29 @@ class ParticipantsPanel(tk.Frame):
         self._load_last_win_statistics()
         for row_data in self.rows:
             self._update_row_last_win(row_data)
+
+    def active_penalty_coefficients(self) -> dict[str, float]:
+        return {
+            name: status.coefficient
+            for name, status in self._penalty_statuses.items()
+        }
+
+    def active_penalty_statuses(self) -> dict[str, WinnerPenaltyStatus]:
+        return dict(self._penalty_statuses)
+
+    def selected_penalty_coefficients(self) -> dict[str, float]:
+        if not self.apply_penalty_var.get():
+            return {}
+        return self.active_penalty_coefficients()
+
+    def _toggle_apply_penalty(self, _event: tk.Event[tk.Misc]) -> str:
+        if str(self.apply_penalty_check.cget("state")) != "disabled":
+            self.apply_penalty_var.set(not self.apply_penalty_var.get())
+        return "break"
+
+    def _on_apply_penalty_changed(self, *_args: object) -> None:
+        if not self.owner.spinning:
+            self.owner._request_wheel_redraw()
 
     def _build_ui(self) -> None:
         heading = tk.Frame(self, bg=PANEL_BACKGROUND)
@@ -320,10 +361,49 @@ class ParticipantsPanel(tk.Frame):
         self.clear_selection_button.bind(
             "<Leave>", lambda _event: self.clear_selection_button.configure(fg=MUTED)
         )
+        tk.Frame(
+            selection_controls,
+            bg=BORDER,
+            width=self._px(1),
+        ).pack(
+            side="left",
+            fill="y",
+            padx=(self._px(16), self._px(12)),
+            pady=self._px(2),
+        )
+        self.apply_penalty_var = tk.BooleanVar(value=True)
+        self.apply_penalty_check = StyledCheckbutton(
+            selection_controls,
+            variable=self.apply_penalty_var,
+            background=PANEL_BACKGROUND,
+        )
+        self.apply_penalty_check.pack(side="left")
+        self.apply_penalty_label = tk.Label(
+            selection_controls,
+            text="Применять штраф",
+            bg=PANEL_BACKGROUND,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 10),
+            cursor="hand2",
+        )
+        self.apply_penalty_label.pack(side="left", padx=(self._px(8), 0))
+        self.apply_penalty_label.bind("<Button-1>", self._toggle_apply_penalty)
+        self.apply_penalty_var.trace_add(
+            "write",
+            self._on_apply_penalty_changed,
+        )
         self.select_all_var.trace_add("write", self._on_select_all_changed)
 
         bm_controls = tk.Frame(influence_row, bg=PANEL_BACKGROUND)
         bm_controls.pack(side="right", fill="y")
+        self.penalty_button = styled_button(
+            bm_controls,
+            "Штрафы победителей",
+            self._open_penalty_settings,
+            SURFACE_LIGHT,
+            TEXT,
+        )
+        self.penalty_button.pack(side="left")
         tk.Frame(
             bm_controls,
             bg=BORDER,
@@ -331,7 +411,7 @@ class ParticipantsPanel(tk.Frame):
         ).pack(
             side="left",
             fill="y",
-            padx=(0, self._px(18)),
+            padx=(self._px(12), self._px(18)),
             pady=self._px(2),
         )
 
@@ -373,7 +453,8 @@ class ParticipantsPanel(tk.Frame):
         ):
             return
 
-        info = self._last_win_statistics.get(clean_nickname(name_var.get()))
+        player_name = clean_nickname(name_var.get())
+        info = self._last_win_statistics.get(player_name)
         if info is None:
             primary.configure(text="Никогда", fg=MUTED)
             primary.place(relx=0.0, rely=0.5, anchor="w")
@@ -383,24 +464,42 @@ class ParticipantsPanel(tk.Frame):
         font_size = 9 if info.draws_ago < 100 else (8 if info.draws_ago < 1000 else 7)
         primary.configure(
             text=format_draws_ago(info.draws_ago),
-            fg=ACCENT_HOVER,
+            fg=DANGER if player_name in self._penalty_statuses else ACCENT_HOVER,
             font=("Segoe UI Semibold", font_size),
         )
         primary.place(relx=0.0, rely=0.5, anchor="w")
         secondary.place_forget()
 
     def _show_last_win_tooltip(
-        self, row_data: dict[str, object], event: tk.Event[tk.Misc]
+        self, row_data: dict[str, object], _event: tk.Event[tk.Misc]
     ) -> None:
         name_var = row_data.get("name")
-        if not isinstance(name_var, tk.StringVar):
+        row = row_data.get("frame")
+        last_win = row_data.get("last_win")
+        if not (
+            isinstance(name_var, tk.StringVar)
+            and isinstance(row, tk.Frame)
+            and isinstance(last_win, tk.Frame)
+        ):
             return
-        result = self._last_win_results.get(clean_nickname(name_var.get()))
+        player_name = clean_nickname(name_var.get())
+        result = self._last_win_results.get(player_name)
         if result is None:
+            return
+
+        self._cancel_last_win_tooltip_hide()
+        tooltip = self._last_win_tooltip
+        if (
+            tooltip is not None
+            and tooltip.winfo_exists()
+            and self._last_win_tooltip_anchor is last_win
+        ):
+            tooltip.lift()
             return
 
         self._hide_last_win_tooltip()
         tooltip = tk.Toplevel(self)
+        tooltip.withdraw()
         tooltip.wm_overrideredirect(True)
         try:
             tooltip.attributes("-topmost", True)
@@ -432,18 +531,87 @@ class ParticipantsPanel(tk.Frame):
             justify="left",
             wraplength=self._px(240),
         ).pack(fill="x", pady=(self._px(2), 0))
-        tooltip.geometry(
-            f"+{event.x_root + self._px(12)}+{event.y_root + self._px(12)}"
-        )
+        penalty = self._penalty_statuses.get(player_name)
+        if penalty is not None:
+            tk.Frame(
+                details,
+                bg=BORDER,
+                height=self._px(1),
+            ).pack(fill="x", pady=(self._px(7), self._px(5)))
+            tk.Label(
+                details,
+                text=(
+                    "Коэффициент: "
+                    f"{format_penalty_coefficient(penalty.coefficient)}"
+                ),
+                bg=SURFACE_LIGHT,
+                fg=DANGER,
+                font=("Segoe UI Semibold", 9),
+                anchor="w",
+            ).pack(fill="x")
+            tk.Label(
+                details,
+                text=(
+                    "До снятия штрафа: "
+                    f"{format_remaining_draws(penalty.remaining_participations)}"
+                ),
+                bg=SURFACE_LIGHT,
+                fg=MUTED,
+                font=("Segoe UI", 8),
+                anchor="w",
+            ).pack(fill="x", pady=(self._px(2), 0))
         self._last_win_tooltip = tooltip
+        self._last_win_tooltip_anchor = last_win
+        def hide_tooltip_on_enter(widget: tk.Misc) -> None:
+            widget.bind(
+                "<Enter>",
+                lambda _event: self._hide_last_win_tooltip(),
+                add="+",
+            )
+            for child in widget.winfo_children():
+                hide_tooltip_on_enter(child)
+
+        # The panel covers rows below it.  It intentionally closes as soon as
+        # the pointer reaches it, so their own last-win cells stay available.
+        hide_tooltip_on_enter(tooltip)
+        tooltip.update_idletasks()
+        width = tooltip.winfo_reqwidth()
+        height = tooltip.winfo_reqheight()
+        row.update_idletasks()
+        row_right = row.winfo_rootx() + row.winfo_width()
+        x = row_right - width
+        x = max(0, min(x, tooltip.winfo_screenwidth() - width))
+        y = row.winfo_rooty() + row.winfo_height()
+        tooltip.geometry(f"{width}x{height}+{x}+{y}")
+        tooltip.deiconify()
+        tooltip.lift()
 
     def _hide_last_win_tooltip(self) -> None:
-        tooltip = self._last_win_tooltip
+        self._cancel_last_win_tooltip_hide()
+        tooltip = getattr(self, "_last_win_tooltip", None)
         self._last_win_tooltip = None
+        self._last_win_tooltip_anchor = None
         if tooltip is not None and tooltip.winfo_exists():
             tooltip.destroy()
 
+    def _cancel_last_win_tooltip_hide(self) -> None:
+        job = getattr(self, "_last_win_tooltip_hide_job", None)
+        self._last_win_tooltip_hide_job = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+
+    def _schedule_last_win_tooltip_hide(self, last_win: tk.Widget) -> None:
+        self._cancel_last_win_tooltip_hide()
+        self._last_win_tooltip_hide_job = self.after(
+            80,
+            lambda: self._hide_last_win_tooltip_if_left(last_win),
+        )
+
     def _hide_last_win_tooltip_if_left(self, last_win: tk.Widget) -> None:
+        self._last_win_tooltip_hide_job = None
         pointer_x, pointer_y = self.winfo_pointerxy()
         widget = self.winfo_containing(pointer_x, pointer_y)
         while widget is not None:
@@ -629,8 +797,8 @@ class ParticipantsPanel(tk.Frame):
             )
             widget.bind(
                 "<Leave>",
-                lambda _event, cell=last_win: self.after_idle(
-                    lambda target=cell: self._hide_last_win_tooltip_if_left(target)
+                lambda _event, cell=last_win: (
+                    self._schedule_last_win_tooltip_hide(cell)
                 ),
                 add="+",
             )
@@ -706,6 +874,7 @@ class ParticipantsPanel(tk.Frame):
         )
         if not confirmed:
             return
+        self._hide_last_win_tooltip()
         frame = row_data["frame"]
         if isinstance(frame, tk.Widget):
             frame.destroy()
@@ -729,6 +898,7 @@ class ParticipantsPanel(tk.Frame):
         )
 
     def _reflow_rows(self) -> None:
+        self._hide_last_win_tooltip()
         for index, row_data in enumerate(self.rows):
             self._place_row(row_data, index)
 
@@ -854,6 +1024,23 @@ class ParticipantsPanel(tk.Frame):
             return
         self.history_dialog = DrawHistoryDialog(self)
 
+    def _open_penalty_settings(self) -> None:
+        if self.penalty_dialog is not None and self.penalty_dialog.winfo_exists():
+            self.penalty_dialog.deiconify()
+            self.penalty_dialog.lift()
+            self.penalty_dialog.focus_force()
+            return
+        self.penalty_dialog = PenaltySettingsDialog(
+            self,
+            self.penalty_settings,
+        )
+
+    def apply_penalty_settings(self, settings: PenaltySettings) -> None:
+        self.owner.set_penalty_settings(settings)
+        self.penalty_settings = settings
+        self.refresh_last_wins()
+        self.owner._request_wheel_redraw()
+
     def refresh_history_dialog(self) -> None:
         self.refresh_last_wins()
         if self.history_dialog is not None and self.history_dialog.winfo_exists():
@@ -864,12 +1051,18 @@ class ParticipantsPanel(tk.Frame):
         for row in self.rows:
             name_var = row.get("name")
             if isinstance(name_var, tk.StringVar):
-                existing[name_var.get().strip().casefold()] = row
+                key = nickname_lookup_key(name_var.get())
+                if key:
+                    existing[key] = row
 
         for participant in participants:
-            row = existing.get(participant.name.casefold())
+            key = nickname_lookup_key(participant.name)
+            if not key:
+                continue
+            row = existing.get(key)
             if row is None:
                 self._add_row(participant.name, False, participant.bm)
+                existing[key] = self.rows[-1]
                 continue
             bm_var = row.get("bm")
             if isinstance(bm_var, tk.StringVar):
@@ -1002,6 +1195,7 @@ class ParticipantsPanel(tk.Frame):
     def _on_owner_unmap(self, event: tk.Event[tk.Misc]) -> None:
         if event.widget is not self.owner:
             return
+        self._hide_last_win_tooltip()
         self._clear_focus_after_restore = True
         self._release_entry_focus()
 
@@ -1161,6 +1355,7 @@ class ParticipantsPanel(tk.Frame):
             self._schedule_auto_save(0)
 
     def destroy(self) -> None:
+        self._hide_last_win_tooltip()
         if self._auto_save_after_id is not None:
             try:
                 self.after_cancel(self._auto_save_after_id)
@@ -1171,6 +1366,8 @@ class ParticipantsPanel(tk.Frame):
             self.import_dialog._close()
         if self.history_dialog is not None and self.history_dialog.winfo_exists():
             self.history_dialog._close()
+        if self.penalty_dialog is not None and self.penalty_dialog.winfo_exists():
+            self.penalty_dialog._close()
         try:
             self.owner.unbind_all("<Button-1>")
             self.owner.unbind_all("<Return>")
@@ -1201,6 +1398,7 @@ class ParticipantsPanel(tk.Frame):
             self._scrollbar_visible = False
 
     def _scroll(self, event: tk.Event[tk.Misc]) -> str:
+        self._hide_last_win_tooltip()
         if self._scrollbar_visible:
             self.canvas.yview_scroll(int(-event.delta / 120), "units")
         return "break"
