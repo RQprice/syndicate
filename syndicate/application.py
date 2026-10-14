@@ -5,13 +5,16 @@ import math
 import os
 import queue
 import tkinter as tk
+from fractions import Fraction
 from tkinter import ttk
 
 import numpy as np
 from PIL import Image
 
 from .draw_workflow import DrawWorkflowMixin
-from .models import DrawResult, Participant, RecordedWheelFrame, sort_participants_by_bm
+from .mass_distribution_ui import MassDistributionPanel
+from .mass_distribution import DistributionRequest, distribution_statistics
+from .models import DrawResult, Participant, RecordedWheelFrame, nickname_lookup_key, sort_participants_by_bm
 from .participants_ui import ParticipantsPanel
 from .platform import (
     apply_dark_title_bar,
@@ -19,18 +22,13 @@ from .platform import (
     keep_dark_title_bar,
     monitor_size_for_window,
 )
-from .storage import DrawLogStore, ParticipantStore
+from .storage import DrawLogStore, MassDistributionStore, ParticipantStore
 from .theme import (
     ACCENT,
     ACCENT_DARK,
     ACCENT_HOVER,
     APP_NAME,
     BACKGROUND,
-    CTA_BACKGROUND,
-    CTA_BORDER,
-    CTA_HOVER,
-    CTA_HOVER_BORDER,
-    CTA_PRESSED,
     DESIGN_SCREEN_HEIGHT,
     DESIGN_SCREEN_WIDTH,
     MAX_UI_SCALE,
@@ -42,7 +40,7 @@ from .theme import (
     WINNER_BACKGROUND,
 )
 from .wheel_rendering import WheelRenderingMixin
-from .widgets import AnimatedEllipsis, PrizeImageCard, PrizeQuantityControl, styled_button
+from .widgets import AnimatedEllipsis, PrizeImageCard, PrizeQuantityControl, WinnerNicknameCopy, primary_action_button, styled_button
 
 
 class WheelApp(DrawWorkflowMixin, WheelRenderingMixin, tk.Tk):
@@ -84,6 +82,15 @@ class WheelApp(DrawWorkflowMixin, WheelRenderingMixin, tk.Tk):
             self.attributes("-alpha", 0.0)
         self.store = ParticipantStore()
         self.draw_log_store = DrawLogStore()
+        self.mass_distribution_store = MassDistributionStore()
+        try:
+            distribution_log = self.mass_distribution_store.load()
+            self._distribution_reports = distribution_log["reports"]
+            self._distribution_balances = self.mass_distribution_store.balances
+        except (OSError, ValueError, TypeError):
+            self._distribution_reports = []
+            self._distribution_balances = {}
+        self._distribution_statistics = distribution_statistics(self._distribution_reports)
         try:
             self.draw_log_store.migrate()
         except (OSError, ValueError, TypeError):
@@ -136,6 +143,7 @@ class WheelApp(DrawWorkflowMixin, WheelRenderingMixin, tk.Tk):
         self._show_main_after_id: str | None = None
         self._finish_show_after_id: str | None = None
         self._rebuilding_ui = False
+        self._active_mode = "draw"
         self.button_process_text = AnimatedEllipsis(self)
 
         self.title(APP_NAME)
@@ -233,6 +241,12 @@ class WheelApp(DrawWorkflowMixin, WheelRenderingMixin, tk.Tk):
         self._rebuilding_ui = True
         try:
             self.participants_panel.flush_auto_save()
+            self.participants_panel._store_distribution_selection()
+            distribution_snapshot = self.mass_distribution_panel.snapshot()
+            participant_selections = {
+                nickname_lookup_key(row["name"].get()): dict(row.get("distribution_enabled", {}))
+                for row in self.participants_panel.rows
+            }
             prize_image = (
                 self.prize_card.image.copy()
                 if self.prize_card.image is not None
@@ -273,6 +287,9 @@ class WheelApp(DrawWorkflowMixin, WheelRenderingMixin, tk.Tk):
             self.minsize(self._px(1050), self._px(650))
             self._configure_styles()
             self._build_ui()
+            for row in self.participants_panel.rows:
+                row["distribution_enabled"] = participant_selections.get(nickname_lookup_key(row["name"].get()), {})
+            self.mass_distribution_panel.restore_snapshot(distribution_snapshot)
 
             if prize_image is not None:
                 self.prize_card.set_image(prize_image)
@@ -324,15 +341,22 @@ class WheelApp(DrawWorkflowMixin, WheelRenderingMixin, tk.Tk):
         content.grid_rowconfigure(0, weight=1)
         content.grid_columnconfigure(1, weight=1)
 
-        left_panel = tk.Frame(
+        left_host = tk.Frame(
             content,
             bg=BACKGROUND,
             width=self.display_left_panel_width,
             highlightthickness=1,
             highlightbackground="#383E39",
         )
-        left_panel.grid(row=0, column=0, sticky="ns")
-        left_panel.grid_propagate(False)
+        self.left_host = left_host
+        left_host.grid(row=0, column=0, sticky="ns")
+        left_host.grid_propagate(False)
+        left_host.grid_rowconfigure(0, weight=1)
+        left_host.grid_columnconfigure(0, weight=1)
+
+        left_panel = tk.Frame(left_host, bg=BACKGROUND)
+        self.draw_panel = left_panel
+        left_panel.grid(row=0, column=0, sticky="nsew")
 
         header = tk.Frame(left_panel, bg=BACKGROUND, height=self._px(78))
         header.pack(
@@ -431,6 +455,7 @@ class WheelApp(DrawWorkflowMixin, WheelRenderingMixin, tk.Tk):
         self.result_label.pack(
             fill="x", pady=(self._px(1), self._px(4))
         )
+        self.winner_nickname_copy = WinnerNicknameCopy(self.result_label, self.result_caption)
 
         self.result_sort_button = tk.Button(
             self.result_card,
@@ -468,44 +493,8 @@ class WheelApp(DrawWorkflowMixin, WheelRenderingMixin, tk.Tk):
         self.action_slot = tk.Frame(controls, bg=BACKGROUND)
         self.action_slot.pack(fill="x")
 
-        self.spin_button = tk.Button(
-            self.action_slot,
-            text="КРУТИТЬ КОЛЕСО",
-            command=self._start_spin,
-            bg=CTA_BACKGROUND,
-            fg="#F1EEE5",
-            activebackground=CTA_PRESSED,
-            activeforeground="#F1EEE5",
-            disabledforeground="#686E69",
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=1,
-            highlightbackground=CTA_BORDER,
-            highlightcolor=CTA_BORDER,
-            cursor="hand2",
-            font=("Segoe UI Semibold", 12),
-            pady=self._px(12),
-        )
+        self.spin_button = primary_action_button(self.action_slot, "КРУТИТЬ КОЛЕСО", self._start_spin)
         self.spin_button.pack(fill="x")
-
-        def spin_enter(_event: tk.Event[tk.Misc]) -> None:
-            if str(self.spin_button.cget("state")) == "normal":
-                self.spin_button.configure(
-                    bg=CTA_HOVER,
-                    highlightbackground=CTA_HOVER_BORDER,
-                    highlightcolor=CTA_HOVER_BORDER,
-                )
-
-        def spin_leave(_event: tk.Event[tk.Misc]) -> None:
-            if str(self.spin_button.cget("state")) == "normal":
-                self.spin_button.configure(
-                    bg=CTA_BACKGROUND,
-                    highlightbackground=CTA_BORDER,
-                    highlightcolor=CTA_BORDER,
-                )
-
-        self.spin_button.bind("<Enter>", spin_enter)
-        self.spin_button.bind("<Leave>", spin_leave)
 
         self.result_actions = tk.Frame(self.action_slot, bg=BACKGROUND)
         self.result_actions.grid_columnconfigure(0, weight=1, uniform="roll_actions")
@@ -539,9 +528,117 @@ class WheelApp(DrawWorkflowMixin, WheelRenderingMixin, tk.Tk):
             row=0, column=1, sticky="ew", padx=(self._px(5), 0)
         )
 
+        self.mass_distribution_panel = MassDistributionPanel(
+            left_host,
+            ui_scale=self.ui_scale,
+            on_event_selected=self._select_distribution_event,
+            on_paste_participants=self._paste_distribution_participants,
+            on_distribute=self._distribute_mass_rewards,
+            on_divisible_items_changed=self._save_divisible_items,
+            on_raffle_items_changed=self._save_raffle_items,
+            on_load_reports=self._load_distribution_reports,
+            divisible_items=self.store.divisible_items,
+            raffle_items=self.store.raffle_items,
+        )
+        self.mass_distribution_panel.grid(row=0, column=0, sticky="nsew")
+
         self.participants_panel = ParticipantsPanel(content, self)
         self.participants_panel.grid(row=0, column=1, sticky="nsew")
+        self._show_active_mode()
         self._update_count()
+
+    def _select_distribution_event(
+        self,
+        event_key: tuple[str, str] | None,
+    ) -> None:
+        self.participants_panel.select_distribution_event(event_key)
+
+    def update_distribution_event_participants(
+        self,
+        event_key: tuple[str, str],
+        participant_names: list[str],
+    ) -> None:
+        self.mass_distribution_panel.set_event_participants(
+            event_key,
+            participant_names,
+        )
+
+    def _paste_distribution_participants(
+        self,
+        event_key: tuple[str, str],
+        clipboard_text: str,
+    ) -> list[str]:
+        return self.participants_panel.apply_distribution_participants_text(
+            event_key,
+            clipboard_text,
+        )
+
+    def _show_active_mode(self) -> None:
+        if self._active_mode == "mass_distribution":
+            self.mass_distribution_panel.tkraise()
+        else:
+            self.draw_panel.tkraise()
+        self.participants_panel.set_mass_distribution_mode(
+            self._active_mode == "mass_distribution"
+        )
+        if self._active_mode == "draw" and getattr(self, "_wheel_redraw_deferred", False):
+            self._request_wheel_redraw()
+
+    def _save_divisible_items(self, names: list[str]) -> None:
+        self.participants_panel.flush_auto_save()
+        self.store.save(self.participants, divisible_items=names)
+
+    def _save_raffle_items(self, names: list[str]) -> None:
+        self.participants_panel.flush_auto_save()
+        self.store.save(self.participants, raffle_items=names)
+
+    def _load_distribution_reports(self) -> list[dict]:
+        return self.mass_distribution_store.load()["reports"]
+
+    def _distribute_mass_rewards(self, requests: list[DistributionRequest]) -> dict:
+        requests = [
+            DistributionRequest(
+                request.event,
+                tuple(self.participants_panel.distribution_participant_names(request.event.key)),
+            )
+            for request in requests
+        ]
+        report = self.mass_distribution_store.distribute(requests, self.store.divisible_items)
+        self._distribution_balances = self.mass_distribution_store.balances
+        self._distribution_reports.append(report)
+        self._distribution_statistics = distribution_statistics(self._distribution_reports)
+        for row in self.participants_panel.rows:
+            self.participants_panel._update_row_last_win(row)
+        return report
+
+    def distribution_balance_for(self, event_name: str, participant_name: str) -> Fraction:
+        ledger = self._distribution_balances.get(nickname_lookup_key(event_name), {})
+        return ledger.get("overall", {}).get(nickname_lookup_key(participant_name), Fraction())
+
+    def distribution_statistics_for(self, event_name: str | None, participant_name: str) -> tuple[int, int]:
+        key = nickname_lookup_key(participant_name)
+        if event_name is None:
+            totals = [statistics.get(key, (0, 0)) for statistics in self._distribution_statistics.values()]
+            return sum(value[0] for value in totals), sum(value[1] for value in totals)
+        statistics = self._distribution_statistics.get(nickname_lookup_key(event_name), {})
+        return statistics.get(key, (0, 0))
+
+    def show_mass_distribution(self) -> None:
+        """Replace the wheel with the mass-distribution workspace."""
+
+        if self.spinning:
+            return
+        self.participants_panel.flush_auto_save()
+        self.focus_set()
+        self._active_mode = "mass_distribution"
+        self._show_active_mode()
+
+    def show_draw_mode(self) -> None:
+        """Restore the wheel without resetting its state."""
+
+        self.focus_set()
+        self._active_mode = "draw"
+        self._show_active_mode()
 
     def _show_main_window(self) -> None:
         """Reveal the app only after its native frame has its final styling."""

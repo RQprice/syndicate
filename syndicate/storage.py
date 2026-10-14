@@ -14,6 +14,13 @@ from .models import (
     nickname_lookup_key,
 )
 from .platform import application_directory
+from .mass_distribution import (
+    DistributionRequest,
+    deserialize_distribution_balances,
+    empty_distribution_log,
+    load_distribution_balances,
+    prepare_distribution,
+)
 from .theme import DEFAULT_BM_INFLUENCE_PERCENT
 
 
@@ -27,6 +34,8 @@ class ParticipantStore:
         self.bm_influence_percent = DEFAULT_BM_INFLUENCE_PERCENT
         self.nickname_corrections: list[NicknameCorrection] = []
         self.penalty_settings = PenaltySettings()
+        self.divisible_items: list[str] = []
+        self.raffle_items: list[str] = []
 
     def load(self) -> list[Participant]:
         if not self.path.exists():
@@ -63,6 +72,15 @@ class ParticipantStore:
             self.penalty_settings = self._load_penalty_settings(
                 raw.get("winner_penalty")
             )
+            item_settings = raw.get("mass_distribution", {})
+            self.divisible_items = self._normalize_item_names(
+                item_settings.get("divisible_items", [])
+                if isinstance(item_settings, dict) else []
+            )
+            self.raffle_items = self._normalize_item_names(
+                item_settings.get("raffle_items", [])
+                if isinstance(item_settings, dict) else []
+            )
             items = raw.get("participants", [])
             result = [
                 Participant(
@@ -83,6 +101,8 @@ class ParticipantStore:
         bm_influence_percent: float | None = None,
         nickname_corrections: list[NicknameCorrection] | None = None,
         penalty_settings: PenaltySettings | None = None,
+        divisible_items: list[str] | None = None,
+        raffle_items: list[str] | None = None,
     ) -> None:
         influence = self.bm_influence_percent
         if bm_influence_percent is not None:
@@ -96,6 +116,12 @@ class ParticipantStore:
             penalty_settings
             if penalty_settings is not None
             else self.penalty_settings
+        )
+        divisible = self._normalize_item_names(
+            self.divisible_items if divisible_items is None else divisible_items
+        )
+        raffle = self._normalize_item_names(
+            self.raffle_items if raffle_items is None else raffle_items
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -115,6 +141,7 @@ class ParticipantStore:
                 "recovery_participations": penalty.recovery_participations,
                 "chance_steps": list(penalty.chance_steps),
             },
+            "mass_distribution": {"divisible_items": divisible, "raffle_items": raffle},
         }
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(
@@ -124,6 +151,18 @@ class ParticipantStore:
         self.bm_influence_percent = influence
         self.nickname_corrections = corrections
         self.penalty_settings = penalty
+        self.divisible_items = divisible
+        self.raffle_items = raffle
+
+    @staticmethod
+    def _normalize_item_names(raw: object) -> list[str]:
+        if not isinstance(raw, list):
+            return []
+        names: dict[str, str] = {}
+        for value in raw:
+            if isinstance(value, str) and (name := clean_nickname(value)):
+                names.setdefault(nickname_lookup_key(name), name)
+        return sorted(names.values(), key=nickname_lookup_key)
 
     @staticmethod
     def _load_penalty_settings(raw: object) -> PenaltySettings:
@@ -149,6 +188,38 @@ class ParticipantStore:
         if not isinstance(recovery, int) or recovery != len(steps) - 1:
             return default
         return PenaltySettings(enabled=enabled, chance_steps=steps)
+
+
+class MassDistributionStore:
+    """Atomically save reports with their exact, history-bound fairness snapshot."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or application_directory() / "mass_distribution_log.json"
+        self.balances: dict = {}
+
+    def load(self) -> dict:
+        raw = (json.loads(self.path.read_text(encoding="utf-8"))
+               if self.path.exists() else empty_distribution_log())
+        balances = load_distribution_balances(raw)
+        self.balances = balances
+        return raw
+
+    def distribute(
+        self,
+        requests: list[DistributionRequest],
+        divisible_items: list[str],
+    ) -> dict:
+        log = self.load()
+        report, updated = prepare_distribution(requests, divisible_items, log, balances=self.balances)
+        balances = deserialize_distribution_balances(updated["balance_cache"]["ledger"])
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(updated, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temporary.replace(self.path)
+        self.balances = balances
+        return report
 
 
 class DrawLogStore:

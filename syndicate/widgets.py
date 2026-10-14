@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import messagebox
 
 from PIL import Image, ImageColor, ImageTk
@@ -23,9 +24,16 @@ from .theme import (
     BUTTON_BORDER,
     BUTTON_HOVER,
     BUTTON_HOVER_BORDER,
+    CTA_BACKGROUND,
+    CTA_BORDER,
+    CTA_HOVER,
+    CTA_HOVER_BORDER,
+    CTA_PRESSED,
     DISABLED_TEXT,
     INPUT_BACKGROUND,
     MUTED,
+    NICKNAME_BACKGROUND,
+    NICKNAME_HOVER,
     SURFACE,
     SURFACE_LIGHT,
     TEXT,
@@ -145,6 +153,305 @@ def styled_button(
     button.bind("<Enter>", enter)
     button.bind("<Leave>", leave)
     return button
+
+def primary_action_button(parent: tk.Misc, text: str, command: object) -> tk.Button:
+    """Use one shared visual style for spinning and mass distribution."""
+    button = tk.Button(
+        parent, text=text, command=command, bg=CTA_BACKGROUND, fg="#F1EEE5",
+        activebackground=CTA_PRESSED, activeforeground="#F1EEE5",
+        disabledforeground="#686E69", relief="flat", borderwidth=0,
+        highlightthickness=1, highlightbackground=CTA_BORDER, highlightcolor=CTA_BORDER,
+        cursor="hand2", font=("Segoe UI Semibold", 12), pady=scaled_px(parent, 12),
+    )
+
+    def set_hover(hovered: bool) -> None:
+        if str(button.cget("state")) == "normal":
+            border = CTA_HOVER_BORDER if hovered else CTA_BORDER
+            button.configure(bg=CTA_HOVER if hovered else CTA_BACKGROUND,
+                             highlightbackground=border, highlightcolor=border)
+
+    button.bind("<Enter>", lambda _event: set_hover(True))
+    button.bind("<Leave>", lambda _event: set_hover(False))
+    return button
+
+
+class CopyNickname(tk.Canvas):
+    """Compact rounded nickname chip with fixed-space, fading copy feedback."""
+
+    FADE_STEPS = 18
+    FADE_INTERVAL_MS = 65
+
+    def __init__(self, parent: tk.Misc, nickname: str, background: str = SURFACE) -> None:
+        super().__init__(parent, bg=background, highlightthickness=0, borderwidth=0, takefocus=1)
+        self.nickname = nickname
+        self._name_font = tkfont.Font(root=self, family="Segoe UI", size=10)
+        self._feedback_font = tkfont.Font(root=self, family="Segoe UI Semibold", size=8)
+        self._max_width = scaled_px(parent, 360)
+        self._hovered = False
+        self._focused = False
+        self._feedback_after_id: str | None = None
+        self._feedback_width = self._feedback_font.measure("Скопировано") + scaled_px(self, 2)
+        self._chip_width = 1
+        self._chip_height = 1
+        self._shape = self.create_polygon(0, 0, 1, 1, smooth=True, splinesteps=16, fill=NICKNAME_BACKGROUND, outline="")
+        self._name_text = self.create_text(0, 0, text=nickname, font=self._name_font, fill=TEXT, anchor="nw")
+        self._feedback_text = self.create_text(
+            0, 0, text="Скопировано", font=self._feedback_font, fill=ACCENT,
+            anchor="w", state="hidden",
+        )
+        self._layout()
+        self.bind("<Enter>", self._pointer_move)
+        self.bind("<Motion>", self._pointer_move)
+        self.bind("<Leave>", lambda _event: self._set_hover(False))
+        self.bind("<Button-1>", self._click)
+        self.bind("<Return>", lambda _event: self.copy())
+        self.bind("<space>", lambda _event: self.copy())
+        self.bind("<FocusIn>", lambda _event: self._set_focus(True))
+        self.bind("<FocusOut>", lambda _event: self._set_focus(False))
+
+    def set_max_width(self, width: int) -> None:
+        if self._max_width != width:
+            self._max_width = width
+            self._layout()
+
+    def _layout(self) -> None:
+        pad_x, pad_y = scaled_px(self, 8), scaled_px(self, 4)
+        gap = scaled_px(self, 6)
+        text_width = max(scaled_px(self, 12), self._max_width - self._feedback_width - gap - 2 * pad_x)
+        self.coords(self._name_text, pad_x, pad_y)
+        self.itemconfigure(self._name_text, width=text_width)
+        bounds = self.bbox(self._name_text)
+        self._chip_width = bounds[2] - bounds[0] + 2 * pad_x
+        self._chip_height = bounds[3] - bounds[1] + 2 * pad_y
+        width, height = self._chip_width, self._chip_height
+        radius = min(scaled_px(self, 6), width // 2, height // 2)
+        self.coords(self._shape,
+                    radius, 0, width - radius, 0, width, 0, width, radius,
+                    width, height - radius, width, height, width - radius, height,
+                    radius, height, 0, height, 0, height - radius, 0, radius, 0, 0)
+        self.coords(self._feedback_text, width + gap, height // 2)
+        self.configure(width=width + gap + self._feedback_width, height=height)
+
+    def _pointer_move(self, event: tk.Event) -> None:
+        self._set_hover(0 <= event.x < self._chip_width and 0 <= event.y < self._chip_height)
+
+    def _set_hover(self, hovered: bool) -> None:
+        if self._hovered != hovered:
+            self._hovered = hovered
+            self.configure(cursor="hand2" if hovered else "")
+            self._update_chip_color()
+
+    def _set_focus(self, focused: bool) -> None:
+        self._focused = focused
+        self._update_chip_color()
+
+    def _update_chip_color(self) -> None:
+        self.itemconfigure(self._shape, fill=NICKNAME_HOVER if self._hovered or self._focused else NICKNAME_BACKGROUND)
+
+    def _click(self, event: tk.Event) -> str | None:
+        if 0 <= event.x < self._chip_width and 0 <= event.y < self._chip_height:
+            return self.copy()
+        return None
+
+    def copy(self) -> str:
+        if not self.winfo_exists():
+            return "break"
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(self.nickname)
+        except tk.TclError:
+            return "break"
+        self._cancel_feedback()
+        self.itemconfigure(self._feedback_text, state="normal", fill=ACCENT)
+        self._fade_feedback(0)
+        return "break"
+
+    def _fade_feedback(self, step: int) -> None:
+        self._feedback_after_id = None
+        if step >= self.FADE_STEPS:
+            self.itemconfigure(self._feedback_text, state="hidden")
+            return
+        background = str(self.cget("bg"))
+        start = self.winfo_rgb(ACCENT)
+        end = self.winfo_rgb(background)
+        amount = step / self.FADE_STEPS
+        color = "#" + "".join(f"{round((a + (b - a) * amount) / 257):02X}" for a, b in zip(start, end))
+        self.itemconfigure(self._feedback_text, fill=color)
+        self._feedback_after_id = self.after(self.FADE_INTERVAL_MS, self._fade_feedback, step + 1)
+
+    def _cancel_feedback(self) -> None:
+        if self._feedback_after_id is not None:
+            self.after_cancel(self._feedback_after_id)
+            self._feedback_after_id = None
+
+    def destroy(self) -> None:
+        self._cancel_feedback()
+        super().destroy()
+
+
+class WinnerNicknameCopy:
+    """Add per-name copying to a label without replacing or relaying it out."""
+
+    FADE_STEPS = 18
+    FADE_INTERVAL_MS = 55
+
+    def __init__(self, label: tk.Label, caption: tk.Label) -> None:
+        self.label = label
+        self.caption = caption
+        # Tk child labels cannot be translucent. A borderless, non-focusable
+        # owned overlay lets the backing and text fade together over the nick.
+        self._feedback_window = tk.Toplevel(label, background=SURFACE_LIGHT, takefocus=0)
+        self._feedback_window.withdraw()
+        self._feedback_window.overrideredirect(True)
+        self._feedback_window.transient(label.winfo_toplevel())
+        self._feedback_window.attributes("-alpha", 0.0)
+        self._feedback_opacity = 1.0
+        self.feedback = tk.Label(
+            self._feedback_window, text="Скопировано", bg=SURFACE_LIGHT, fg=ACCENT,
+            font=("Segoe UI Semibold", 8), borderwidth=0,
+            padx=scaled_px(label, 6), pady=scaled_px(label, 3),
+        )
+        self.feedback.pack()
+        self.feedback.bind("<Button-1>", self._feedback_click)
+        # An unmanaged canvas uses the same native Tk text layout as the label,
+        # including word wrapping. It is never displayed or geometry-managed.
+        self._mirror = tk.Canvas(label, highlightthickness=0, borderwidth=0)
+        self._text_item = self._mirror.create_text(0, 0, anchor="nw")
+        self._signature = None
+        self._font_spec = None
+        self._font = None
+        self._ranges: list[tuple[int, int, str]] = []
+        self._lines: list[tuple[int, int, float, float]] = []
+        self._origin = (0, 0)
+        self._line_height = 1
+        self._feedback_after_id: str | None = None
+        self._cursor = ""
+        for sequence in ("<Enter>", "<Motion>"):
+            label.bind(sequence, self._pointer_move, add="+")
+        label.bind("<Leave>", lambda _event: self._set_cursor(""), add="+")
+        label.bind("<Button-1>", self._click, add="+")
+        label.bind("<Destroy>", self._destroy, add="+")
+
+    def refresh(self) -> None:
+        self._signature = None
+        self._cancel_feedback()
+        self._feedback_window.withdraw()
+        self._set_cursor("")
+
+    def _ensure_layout(self) -> None:
+        text = str(self.label.cget("text"))
+        font_spec = str(self.label.cget("font"))
+        wrap = self.label.winfo_pixels(self.label.cget("wraplength"))
+        justify = str(self.label.cget("justify"))
+        width, height = self.label.winfo_width(), self.label.winfo_height()
+        signature = (text, font_spec, wrap, justify, width, height)
+        if signature == self._signature:
+            return
+        self._signature = signature
+        self._ranges = []
+        position = 0
+        for name in text.split(" | ") if text else []:
+            length = int(self.label.tk.call("string", "length", name))
+            self._ranges.append((position, position + length, name))
+            position += length + 3
+        self._mirror.itemconfigure(self._text_item, text=text, font=font_spec, width=wrap, justify=justify)
+        self._lines = []
+        bounds = self._mirror.bbox(self._text_item)
+        if not text or bounds is None:
+            return
+        if font_spec != self._font_spec:
+            self._font_spec = font_spec
+            self._font = tkfont.Font(root=self.label, font=font_spec)
+        # Canvas text bounds include a one-pixel horizontal drawing margin.
+        layout_width, layout_height = bounds[2] - bounds[0] - 2, bounds[3] - bounds[1]
+        self._origin = ((width - layout_width) // 2, (height - layout_height) // 2)
+        self._line_height = self._font.metrics("linespace")
+        for index in range((layout_height + self._line_height - 1) // self._line_height):
+            y = index * self._line_height + self._line_height // 2
+            start = self._mirror.index(self._text_item, f"@-100000,{y}")
+            end = self._mirror.index(self._text_item, f"@100000,{y}")
+            line = str(self.label.tk.call("string", "range", text, start, end - 1)).rstrip()
+            line_width = self._font.measure(line)
+            left = (layout_width - line_width) / 2 if justify == "center" else (
+                layout_width - line_width if justify == "right" else 0
+            )
+            self._lines.append((start, end, left, left + line_width))
+
+    def nickname_at(self, x: int, y: int) -> str | None:
+        if not (0 <= x < self.label.winfo_width() and 0 <= y < self.label.winfo_height()):
+            return None
+        self._ensure_layout()
+        x, y = x - self._origin[0], y - self._origin[1]
+        line_index = y // self._line_height
+        if not 0 <= line_index < len(self._lines):
+            return None
+        _start, _end, left, right = self._lines[line_index]
+        if not left <= x < right:
+            return None
+        character = self._mirror.index(self._text_item, f"@{x},{y}")
+        return next((name for start, end, name in self._ranges if start <= character < end), None)
+
+    def _set_cursor(self, cursor: str) -> None:
+        if cursor != self._cursor:
+            self._cursor = cursor
+            self.label.configure(cursor=cursor)
+
+    def _pointer_move(self, event: tk.Event) -> None:
+        self._set_cursor("hand2" if self.nickname_at(event.x, event.y) is not None else "")
+
+    def _click(self, event: tk.Event) -> str | None:
+        return self._copy_at(event.x, event.y)
+
+    def _feedback_click(self, event: tk.Event) -> str | None:
+        # The overlay must not swallow a repeat click on the nickname below it.
+        x = self.feedback.winfo_rootx() + event.x - self.label.winfo_rootx()
+        y = self.feedback.winfo_rooty() + event.y - self.label.winfo_rooty()
+        return self._copy_at(x, y)
+
+    def _copy_at(self, x: int, y: int) -> str | None:
+        name = self.nickname_at(x, y)
+        if name is None:
+            return None
+        try:
+            self.label.clipboard_clear()
+            self.label.clipboard_append(name)
+        except tk.TclError:
+            return "break"
+        self._cancel_feedback()
+        self.feedback.configure(fg=ACCENT, bg=SURFACE_LIGHT)
+        parent = self.caption.master
+        width, height = self.feedback.winfo_reqwidth(), self.feedback.winfo_reqheight()
+        # Anchor the lower-left corner at the click, keeping the backing in the card.
+        left = self.label.winfo_rootx() - parent.winfo_rootx() + x
+        top = self.label.winfo_rooty() - parent.winfo_rooty() + y - height
+        left = max(0, min(left, parent.winfo_width() - width))
+        top = max(0, min(top, parent.winfo_height() - height))
+        self._feedback_window.geometry(
+            f"{width}x{height}{parent.winfo_rootx() + left:+d}{parent.winfo_rooty() + top:+d}"
+        )
+        self._feedback_opacity = float(self.label.winfo_toplevel().attributes("-alpha"))
+        self._feedback_window.attributes("-alpha", self._feedback_opacity)
+        self._feedback_window.deiconify()
+        self._feedback_window.lift()
+        self._fade_feedback(0)
+        return "break"
+
+    def _fade_feedback(self, step: int) -> None:
+        self._feedback_after_id = None
+        if step >= self.FADE_STEPS:
+            self._feedback_window.withdraw()
+            return
+        self._feedback_window.attributes("-alpha", self._feedback_opacity * (1 - step / self.FADE_STEPS))
+        self._feedback_after_id = self.feedback.after(self.FADE_INTERVAL_MS, self._fade_feedback, step + 1)
+
+    def _cancel_feedback(self) -> None:
+        if self._feedback_after_id is not None:
+            self.feedback.after_cancel(self._feedback_after_id)
+            self._feedback_after_id = None
+
+    def _destroy(self, _event: tk.Event) -> None:
+        self._cancel_feedback()
+
 
 class StyledCheckbutton(tk.Canvas):
     SIZE = 30

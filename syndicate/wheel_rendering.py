@@ -45,6 +45,9 @@ from .widgets import PrizeImageCard
 
 class WheelRenderingMixin:
     def _draw_wheel(self) -> None:
+        if getattr(self, "_active_mode", "draw") == "mass_distribution":
+            self._wheel_redraw_deferred = True
+            return
         canvas = self.wheel_canvas
         if self._roll_slots is not None and self._roll_probabilities is not None:
             active = self._roll_slots
@@ -535,6 +538,10 @@ class WheelRenderingMixin:
         )
 
     def _request_wheel_redraw(self) -> None:
+        if getattr(self, "_active_mode", "draw") == "mass_distribution":
+            self._wheel_redraw_deferred = True
+            return
+        self._wheel_redraw_deferred = False
         active = self.active_participants
         weights = participant_weights(
             active, self.bm_influence_percent, self.participants

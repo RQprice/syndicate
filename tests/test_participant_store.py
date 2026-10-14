@@ -9,6 +9,24 @@ from syndicate.theme import DEFAULT_BM_INFLUENCE_PERCENT
 
 
 class ParticipantStoreTests(unittest.TestCase):
+    def test_item_categories_are_saved_independently_and_survive_regular_saves(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "data.json"
+            store = ParticipantStore(path)
+            store.save([], divisible_items=["Кровь Имира"])
+            store.save([], raffle_items=[" Верх Кари ", "верх кари"])
+            store.save([Participant("Игрок", bm=100)], 50)
+
+            reloaded = ParticipantStore(path)
+            reloaded.load()
+            self.assertEqual(reloaded.divisible_items, ["Кровь Имира"])
+            self.assertEqual(reloaded.raffle_items, ["Верх Кари"])
+            reloaded.save([], divisible_items=[])
+            final = ParticipantStore(path)
+            final.load()
+            self.assertEqual(final.divisible_items, [])
+            self.assertEqual(final.raffle_items, ["Верх Кари"])
+
     def test_missing_data_file_is_created_without_demo_participants(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "data.json"

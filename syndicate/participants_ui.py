@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -40,6 +41,7 @@ from .theme import (
     BUTTON_HOVER,
     BUTTON_HOVER_BORDER,
     DANGER,
+    DISABLED_TEXT,
     INPUT_BACKGROUND,
     MUTED,
     PANEL_BACKGROUND,
@@ -69,12 +71,20 @@ class ParticipantsPanel(tk.Frame):
         self._auto_save_after_id: str | None = None
         self._save_pending = False
         self._last_save_error = ""
+        self._focus_move_after_id: str | None = None
+        self._scroll_update_after_id: str | None = None
+        self._scroll_region = None
+        self._rows_canvas_width: int | None = None
         self._syncing_select_all = False
         self._bulk_selection = False
         self._clear_focus_after_restore = False
         self._last_win_statistics: dict[str, LastWinInfo] = {}
         self._last_win_results: dict[str, DrawResult] = {}
         self._penalty_statuses: dict[str, WinnerPenaltyStatus] = {}
+        self._mass_distribution_mode = False
+        self._active_distribution_event_key: tuple[str, str] | None = None
+        self._distribution_pulse_after_id: str | None = None
+        self._distribution_pulse_step = 0
         self._last_win_tooltip: tk.Toplevel | None = None
         self._last_win_tooltip_anchor: tk.Widget | None = None
         self._last_win_tooltip_hide_job: str | None = None
@@ -162,12 +172,17 @@ class ParticipantsPanel(tk.Frame):
             self.owner._request_wheel_redraw()
 
     def _build_ui(self) -> None:
-        heading = tk.Frame(self, bg=PANEL_BACKGROUND)
+        heading = tk.Frame(
+            self,
+            bg=PANEL_BACKGROUND,
+            height=self._px(41),
+        )
         heading.pack(
             fill="x",
             padx=self._px(24),
             pady=(self._px(18), self._px(10)),
         )
+        heading.pack_propagate(False)
 
         tk.Label(
             heading,
@@ -185,6 +200,17 @@ class ParticipantsPanel(tk.Frame):
         )
         self.guild_count_label.pack(
             side="left", padx=(self._px(7), 0), pady=(self._px(2), 0)
+        )
+        self.mass_distribution_button = styled_button(
+            heading,
+            "Массовое распределение",
+            self.owner.show_mass_distribution,
+            SURFACE_LIGHT,
+            TEXT,
+        )
+        self.mass_distribution_button.pack(
+            side="left",
+            padx=(self._px(16), 0),
         )
 
         self.import_button = styled_button(
@@ -215,12 +241,28 @@ class ParticipantsPanel(tk.Frame):
         )
         self.history_button.pack(side="right")
 
+        self.distribution_header_separator = tk.Frame(
+            heading, bg=BORDER, width=self._px(1),
+        )
+        self.distribution_header_controls = tk.Frame(heading, bg=PANEL_BACKGROUND)
+        self.distribution_reports_button = styled_button(
+            self.distribution_header_controls, "Отчёты",
+            lambda: self.owner.mass_distribution_panel._open_reports(), SURFACE_LIGHT, TEXT,
+        )
+        self.distribution_reports_button.pack(side="left", padx=(0, self._px(8)))
+        self.item_settings_button = styled_button(
+            self.distribution_header_controls, "Настройки предметов",
+            lambda: self.owner.mass_distribution_panel._open_item_settings(), SURFACE_LIGHT, TEXT,
+        )
+        self.item_settings_button.pack(side="left")
+
         list_shell = tk.Frame(
             self,
             bg=SURFACE,
             highlightthickness=1,
             highlightbackground=BORDER,
         )
+        self.list_shell = list_shell
         list_shell.pack(fill="both", expand=True, padx=self._px(24))
 
         columns_header = tk.Frame(
@@ -230,6 +272,8 @@ class ParticipantsPanel(tk.Frame):
         columns_header.pack_propagate(False)
         columns_header.grid_columnconfigure(0, weight=1, uniform="headers")
         columns_header.grid_columnconfigure(1, weight=1, uniform="headers")
+        self.last_win_header_labels: list[tk.Label] = []
+        self.last_win_header_separators: list[tk.Frame] = []
         for column in range(2):
             column_header = tk.Frame(columns_header, bg=SURFACE)
             column_header.grid(
@@ -258,26 +302,30 @@ class ParticipantsPanel(tk.Frame):
                 column=1,
                 sticky="w",
             )
-            tk.Label(
+            last_win_heading = tk.Label(
                 column_header,
                 text="ПОСЛЕДНЯЯ ПОБЕДА",
                 bg=SURFACE,
                 fg=MUTED,
                 font=("Segoe UI Semibold", 9),
-            ).grid(
+            )
+            last_win_heading.grid(
                 row=0,
                 column=4,
             )
-            tk.Frame(
+            last_win_header_separator = tk.Frame(
                 column_header,
                 bg="#343B36",
                 width=self._px(1),
-            ).grid(
+            )
+            last_win_header_separator.grid(
                 row=0,
                 column=3,
                 sticky="ns",
                 pady=self._px(5),
             )
+            self.last_win_header_labels.append(last_win_heading)
+            self.last_win_header_separators.append(last_win_header_separator)
             tk.Label(
                 column_header,
                 text="БМ",
@@ -313,7 +361,12 @@ class ParticipantsPanel(tk.Frame):
         self.canvas.bind("<Configure>", self._resize_rows)
         self.canvas.bind("<MouseWheel>", self._scroll)
 
-        influence_row = tk.Frame(self, bg=PANEL_BACKGROUND)
+        influence_row = tk.Frame(
+            self,
+            bg=PANEL_BACKGROUND,
+            height=self._px(34),
+        )
+        self.influence_row = influence_row
         influence_row.pack(
             fill="x",
             padx=self._px(24),
@@ -329,7 +382,7 @@ class ParticipantsPanel(tk.Frame):
             background=PANEL_BACKGROUND,
         )
         self.select_all_check.pack(side="left")
-        select_all_label = tk.Label(
+        self.select_all_label = tk.Label(
             selection_controls,
             text="Выбрать всех",
             bg=PANEL_BACKGROUND,
@@ -337,8 +390,8 @@ class ParticipantsPanel(tk.Frame):
             font=("Segoe UI Semibold", 10),
             cursor="hand2",
         )
-        select_all_label.pack(side="left", padx=(self._px(8), 0))
-        select_all_label.bind("<Button-1>", self._toggle_select_all_label)
+        self.select_all_label.pack(side="left", padx=(self._px(8), 0))
+        self.select_all_label.bind("<Button-1>", self._toggle_select_all_label)
         self.clear_selection_button = tk.Label(
             selection_controls,
             text="Убрать выделение",
@@ -356,13 +409,19 @@ class ParticipantsPanel(tk.Frame):
             "<Button-1>", lambda _event: self._clear_selection()
         )
         self.clear_selection_button.bind(
-            "<Enter>", lambda _event: self.clear_selection_button.configure(fg=TEXT)
+            "<Enter>", self._on_clear_selection_enter
         )
         self.clear_selection_button.bind(
-            "<Leave>", lambda _event: self.clear_selection_button.configure(fg=MUTED)
+            "<Leave>", self._on_clear_selection_leave
         )
-        tk.Frame(
+        influence_row.pack_propagate(False)
+        self.apply_penalty_controls = tk.Frame(
             selection_controls,
+            bg=PANEL_BACKGROUND,
+        )
+        self.apply_penalty_controls.pack(side="left")
+        tk.Frame(
+            self.apply_penalty_controls,
             bg=BORDER,
             width=self._px(1),
         ).pack(
@@ -373,13 +432,13 @@ class ParticipantsPanel(tk.Frame):
         )
         self.apply_penalty_var = tk.BooleanVar(value=True)
         self.apply_penalty_check = StyledCheckbutton(
-            selection_controls,
+            self.apply_penalty_controls,
             variable=self.apply_penalty_var,
             background=PANEL_BACKGROUND,
         )
         self.apply_penalty_check.pack(side="left")
         self.apply_penalty_label = tk.Label(
-            selection_controls,
+            self.apply_penalty_controls,
             text="Применять штраф",
             bg=PANEL_BACKGROUND,
             fg=TEXT,
@@ -395,9 +454,15 @@ class ParticipantsPanel(tk.Frame):
         self.select_all_var.trace_add("write", self._on_select_all_changed)
 
         bm_controls = tk.Frame(influence_row, bg=PANEL_BACKGROUND)
+        self.bm_controls = bm_controls
         bm_controls.pack(side="right", fill="y")
-        self.penalty_button = styled_button(
+        self.penalty_settings_controls = tk.Frame(
             bm_controls,
+            bg=PANEL_BACKGROUND,
+        )
+        self.penalty_settings_controls.pack(side="left", fill="y")
+        self.penalty_button = styled_button(
+            self.penalty_settings_controls,
             "Штрафы победителей",
             self._open_penalty_settings,
             SURFACE_LIGHT,
@@ -405,7 +470,7 @@ class ParticipantsPanel(tk.Frame):
         )
         self.penalty_button.pack(side="left")
         tk.Frame(
-            bm_controls,
+            self.penalty_settings_controls,
             bg=BORDER,
             width=self._px(1),
         ).pack(
@@ -442,6 +507,263 @@ class ParticipantsPanel(tk.Frame):
         self.influence_entry.pack(side="right", ipady=self._px(6))
         influence_label.pack(side="right", padx=(0, self._px(10)))
 
+    def set_mass_distribution_mode(self, enabled: bool) -> None:
+        """Adapt shared participant controls to the selected application mode."""
+
+        if enabled != self._mass_distribution_mode:
+            self._switch_selection_mode(enabled)
+        self._mass_distribution_mode = enabled
+        self._hide_last_win_tooltip()
+        if enabled:
+            self.apply_penalty_controls.pack_forget()
+            self.bm_controls.pack_forget()
+            self.history_separator.pack_forget()
+            self.history_button.pack_forget()
+            if not self.distribution_header_separator.winfo_manager():
+                self.distribution_header_separator.pack(
+                    side="right", fill="y", padx=self._px(12), pady=self._px(2),
+                )
+            if not self.distribution_header_controls.winfo_manager():
+                self.distribution_header_controls.pack(side="right")
+            self.mass_distribution_button.configure(
+                text="К розыгрышу",
+                command=self.owner.show_draw_mode,
+            )
+            for label in self.last_win_header_labels:
+                label.configure(text="УЧАСТИЯ / ВЫДАЧИ")
+                label.grid_configure(
+                    sticky="w",
+                    padx=(self._px(10), 0),
+                )
+            for separator in self.last_win_header_separators:
+                separator.configure(bg="#343B36")
+        else:
+            self.distribution_header_controls.pack_forget()
+            self.distribution_header_separator.pack_forget()
+            if not self.apply_penalty_controls.winfo_manager():
+                self.apply_penalty_controls.pack(side="left")
+            if not self.bm_controls.winfo_manager():
+                self.bm_controls.pack(side="right", fill="y")
+            if not self.history_separator.winfo_manager():
+                self.history_separator.pack(
+                    side="right",
+                    fill="y",
+                    padx=self._px(12),
+                    pady=self._px(2),
+                )
+            if not self.history_button.winfo_manager():
+                self.history_button.pack(side="right")
+            self.mass_distribution_button.configure(
+                text="Массовое распределение",
+                command=self.owner.show_mass_distribution,
+            )
+            for label in self.last_win_header_labels:
+                label.configure(text="ПОСЛЕДНЯЯ ПОБЕДА")
+                label.grid_configure(sticky="", padx=0)
+            for separator in self.last_win_header_separators:
+                separator.configure(bg="#343B36")
+        for row_data in self.rows:
+            self._update_row_last_win(row_data)
+        self._update_distribution_selection_controls()
+
+    def _switch_selection_mode(self, mass_distribution: bool) -> None:
+        if not mass_distribution:
+            self._store_distribution_selection()
+        self._bulk_selection = True
+        try:
+            for row_data in self.rows:
+                enabled_var = row_data.get("enabled")
+                if not isinstance(enabled_var, tk.BooleanVar):
+                    continue
+                if mass_distribution:
+                    row_data["draw_enabled"] = enabled_var.get()
+                else:
+                    enabled_var.set(bool(row_data.get("draw_enabled", False)))
+        finally:
+            self._bulk_selection = False
+        if mass_distribution:
+            self._load_distribution_selection()
+        self._refresh_select_all_state()
+
+    def select_distribution_event(
+        self,
+        event_key: tuple[str, str] | None,
+    ) -> None:
+        """Show and edit the participant selection belonging to one event."""
+
+        self._store_distribution_selection()
+        self._active_distribution_event_key = event_key
+        if self._mass_distribution_mode:
+            self._load_distribution_selection()
+            self._notify_distribution_participants_changed()
+            self._update_distribution_selection_controls()
+            for row in self.rows:
+                self._update_row_last_win(row)
+        if event_key is not None:
+            self._start_distribution_border_pulse()
+
+    def _store_distribution_selection(self) -> None:
+        event_key = self._active_distribution_event_key
+        if event_key is None or not self._mass_distribution_mode:
+            return
+        for row_data in self.rows:
+            enabled_var = row_data.get("enabled")
+            selections = row_data.setdefault("distribution_enabled", {})
+            if isinstance(enabled_var, tk.BooleanVar) and isinstance(selections, dict):
+                selections[event_key] = enabled_var.get()
+
+    def _load_distribution_selection(self) -> None:
+        event_key = self._active_distribution_event_key
+        self._bulk_selection = True
+        try:
+            for row_data in self.rows:
+                enabled_var = row_data.get("enabled")
+                selections = row_data.get("distribution_enabled")
+                if not isinstance(enabled_var, tk.BooleanVar):
+                    continue
+                selected = (
+                    bool(selections.get(event_key, False))
+                    if event_key is not None and isinstance(selections, dict)
+                    else False
+                )
+                enabled_var.set(selected)
+        finally:
+            self._bulk_selection = False
+        self._refresh_select_all_state()
+
+    def distribution_participant_names(
+        self,
+        event_key: tuple[str, str],
+    ) -> list[str]:
+        names: list[str] = []
+        for row_data in self.rows:
+            name_var = row_data.get("name")
+            enabled_var = row_data.get("enabled")
+            selections = row_data.get("distribution_enabled")
+            if not isinstance(name_var, tk.StringVar):
+                continue
+            selected = (
+                enabled_var.get()
+                if (
+                    self._mass_distribution_mode
+                    and event_key == self._active_distribution_event_key
+                    and isinstance(enabled_var, tk.BooleanVar)
+                )
+                else bool(selections.get(event_key, False))
+                if isinstance(selections, dict)
+                else False
+            )
+            name = clean_nickname(name_var.get())
+            if selected and name:
+                names.append(name)
+        return names
+
+    def apply_distribution_participants_text(
+        self,
+        event_key: tuple[str, str],
+        text: str,
+    ) -> list[str]:
+        """Apply a copied comma/newline separated roster to one event only."""
+
+        requested_names = {
+            nickname_lookup_key(part)
+            for part in re.split(r"[,;\n\r\t]+", text)
+            if nickname_lookup_key(part)
+        }
+        for row_data in self.rows:
+            name_var = row_data.get("name")
+            if not isinstance(name_var, tk.StringVar):
+                continue
+            selections = row_data.setdefault("distribution_enabled", {})
+            if not isinstance(selections, dict):
+                continue
+            selections[event_key] = (
+                nickname_lookup_key(name_var.get()) in requested_names
+            )
+
+        if (
+            self._mass_distribution_mode
+            and self._active_distribution_event_key == event_key
+        ):
+            self._load_distribution_selection()
+        self._notify_distribution_event_participants_changed(event_key)
+        return self.distribution_participant_names(event_key)
+
+    def _notify_distribution_participants_changed(self) -> None:
+        event_key = getattr(self, "_active_distribution_event_key", None)
+        if event_key is not None:
+            self._notify_distribution_event_participants_changed(event_key)
+
+    def _notify_distribution_event_participants_changed(
+        self,
+        event_key: tuple[str, str],
+    ) -> None:
+        owner = getattr(self, "owner", None)
+        callback = getattr(owner, "update_distribution_event_participants", None)
+        if not callable(callback):
+            return
+        callback(event_key, self.distribution_participant_names(event_key))
+
+    def _update_distribution_selection_controls(self) -> None:
+        enabled = (
+            not self._mass_distribution_mode
+            or self._active_distribution_event_key is not None
+        )
+        state = "normal" if enabled else "disabled"
+        self.select_all_check.configure(state=state)
+        self.select_all_label.configure(
+            fg=TEXT if enabled else DISABLED_TEXT,
+            cursor="hand2" if enabled else "arrow",
+        )
+        self.clear_selection_button.configure(
+            fg=MUTED if enabled else DISABLED_TEXT,
+            cursor="hand2" if enabled else "arrow",
+        )
+        for row_data in self.rows:
+            check = row_data.get("check")
+            if isinstance(check, StyledCheckbutton):
+                check.configure(state=state)
+
+    @staticmethod
+    def _blend_border_color(start: str, end: str, amount: float) -> str:
+        start_rgb = tuple(int(start[index : index + 2], 16) for index in (1, 3, 5))
+        end_rgb = tuple(int(end[index : index + 2], 16) for index in (1, 3, 5))
+        blended = tuple(
+            round(left + (right - left) * amount)
+            for left, right in zip(start_rgb, end_rgb)
+        )
+        return "#" + "".join(f"{component:02X}" for component in blended)
+
+    def _start_distribution_border_pulse(self) -> None:
+        if self._distribution_pulse_after_id is not None:
+            try:
+                self.after_cancel(self._distribution_pulse_after_id)
+            except tk.TclError:
+                pass
+        self._distribution_pulse_step = 0
+        self._animate_distribution_border()
+
+    def _animate_distribution_border(self) -> None:
+        steps = 25
+        amount = math.sin(math.pi * self._distribution_pulse_step / (steps - 1))
+        color = self._blend_border_color(BORDER, ACCENT, amount)
+        self.list_shell.configure(
+            highlightbackground=color,
+            highlightcolor=color,
+        )
+        self._distribution_pulse_step += 1
+        if self._distribution_pulse_step < steps:
+            self._distribution_pulse_after_id = self.after(
+                32,
+                self._animate_distribution_border,
+            )
+            return
+        self._distribution_pulse_after_id = None
+        self.list_shell.configure(
+            highlightbackground=BORDER,
+            highlightcolor=BORDER,
+        )
+
     def _update_row_last_win(self, row_data: dict[str, object]) -> None:
         name_var = row_data.get("name")
         primary = row_data.get("last_win_primary")
@@ -451,6 +773,26 @@ class ParticipantsPanel(tk.Frame):
             and isinstance(primary, tk.Label)
             and isinstance(secondary, tk.Label)
         ):
+            return
+
+        if self._mass_distribution_mode:
+            event_key = self._active_distribution_event_key
+            statistics_callback = getattr(self.owner, "distribution_statistics_for", None)
+            if callable(statistics_callback):
+                participations, allocations = statistics_callback(
+                    event_key[0] if event_key is not None else None,
+                    clean_nickname(name_var.get()),
+                )
+                primary.configure(
+                    text=f"{participations} / {allocations}",
+                    fg=MUTED,
+                    font=("Segoe UI Semibold", 9),
+                )
+                primary.place(relx=0.0, rely=0.5, anchor="w")
+            else:
+                primary.configure(text="", fg=MUTED)
+                primary.place_forget()
+            secondary.place_forget()
             return
 
         player_name = clean_nickname(name_var.get())
@@ -464,7 +806,12 @@ class ParticipantsPanel(tk.Frame):
         font_size = 9 if info.draws_ago < 100 else (8 if info.draws_ago < 1000 else 7)
         primary.configure(
             text=format_draws_ago(info.draws_ago),
-            fg=DANGER if player_name in self._penalty_statuses else ACCENT_HOVER,
+            fg=(
+                DANGER
+                if not self._mass_distribution_mode
+                and player_name in self._penalty_statuses
+                else ACCENT_HOVER
+            ),
             font=("Segoe UI Semibold", font_size),
         )
         primary.place(relx=0.0, rely=0.5, anchor="w")
@@ -473,6 +820,8 @@ class ParticipantsPanel(tk.Frame):
     def _show_last_win_tooltip(
         self, row_data: dict[str, object], _event: tk.Event[tk.Misc]
     ) -> None:
+        if self._mass_distribution_mode:
+            return
         name_var = row_data.get("name")
         row = row_data.get("frame")
         last_win = row_data.get("last_win")
@@ -531,7 +880,11 @@ class ParticipantsPanel(tk.Frame):
             justify="left",
             wraplength=self._px(240),
         ).pack(fill="x", pady=(self._px(2), 0))
-        penalty = self._penalty_statuses.get(player_name)
+        penalty = (
+            None
+            if self._mass_distribution_mode
+            else self._penalty_statuses.get(player_name)
+        )
         if penalty is not None:
             tk.Frame(
                 details,
@@ -722,6 +1075,13 @@ class ParticipantsPanel(tk.Frame):
             "separator": separator,
             "hovered": False,
         }
+        if self._mass_distribution_mode:
+            row_data["draw_enabled"] = False
+            row_data["distribution_enabled"] = {}
+            if self._active_distribution_event_key is not None:
+                selections = row_data["distribution_enabled"]
+                assert isinstance(selections, dict)
+                selections[self._active_distribution_event_key] = enabled
         delete = StyledDeleteButton(
             content,
             command=lambda data=row_data: self._delete_row(data),
@@ -811,12 +1171,21 @@ class ParticipantsPanel(tk.Frame):
         name_var.trace_add(
             "write", lambda *_args, data=row_data: self._update_row_last_win(data)
         )
+        name_var.trace_add(
+            "write",
+            lambda *_args: self._notify_distribution_participants_changed(),
+        )
         bm_var.trace_add("write", self._on_text_value_changed)
         enabled_var.trace_add("write", self._on_toggle_value_changed)
         enabled_var.trace_add(
             "write", lambda *_args, data=row_data: self._update_row_selection(data)
         )
         self._update_row_selection(row_data)
+        if (
+            self._mass_distribution_mode
+            and self._active_distribution_event_key is None
+        ):
+            check.configure(state="disabled")
         entry.bind("<FocusIn>", self._on_entry_focus_in, add="+")
         entry.bind("<FocusOut>", self._on_entry_focus_out, add="+")
         bm_entry.bind("<FocusIn>", self._on_entry_focus_in, add="+")
@@ -882,6 +1251,7 @@ class ParticipantsPanel(tk.Frame):
         self._reflow_rows()
         self._refresh_select_all_state()
         self._update_guild_count()
+        self._notify_distribution_participants_changed()
         self._schedule_auto_save(0)
 
     def _place_row(self, row_data: dict[str, object], index: int) -> None:
@@ -939,6 +1309,7 @@ class ParticipantsPanel(tk.Frame):
         name_entry = row_data.get("name_entry")
         bm_entry = row_data.get("bm_entry")
         delete = row_data.get("delete")
+        last_win_separator = row_data.get("last_win_separator")
         last_win_widgets = (
             row_data.get("last_win"),
             row_data.get("last_win_text"),
@@ -960,6 +1331,8 @@ class ParticipantsPanel(tk.Frame):
             strip.configure(bg=ACCENT if enabled_var.get() else background)
         if isinstance(check, StyledCheckbutton):
             check.configure(bg=background)
+        if isinstance(last_win_separator, tk.Frame):
+            last_win_separator.configure(bg="#343B36")
         for widget in last_win_widgets:
             if isinstance(widget, (tk.Frame, tk.Label)):
                 widget.configure(bg=background)
@@ -1070,13 +1443,17 @@ class ParticipantsPanel(tk.Frame):
         self._schedule_auto_save(0)
 
     def _on_text_value_changed(self, *_args: object) -> None:
-        self._schedule_auto_save(250)
+        self._schedule_auto_save(450)
 
     def _on_toggle_value_changed(self, *_args: object) -> None:
         if self._bulk_selection:
             return
         self._release_entry_focus()
         self._refresh_select_all_state()
+        if self._mass_distribution_mode:
+            self._store_distribution_selection()
+            self._notify_distribution_participants_changed()
+            return
         self._schedule_auto_save(self.SELECTION_UPDATE_DELAY_MS)
 
     def _on_select_all_changed(self, *_args: object) -> None:
@@ -1092,7 +1469,30 @@ class ParticipantsPanel(tk.Frame):
     def _clear_selection(self) -> None:
         if self.owner.spinning:
             return
+        if (
+            self._mass_distribution_mode
+            and self._active_distribution_event_key is None
+        ):
+            return
         self._set_all_enabled(False)
+
+    def _on_clear_selection_enter(self, _event: tk.Event[tk.Misc]) -> None:
+        enabled = (
+            not self._mass_distribution_mode
+            or self._active_distribution_event_key is not None
+        )
+        self.clear_selection_button.configure(
+            fg=TEXT if enabled else DISABLED_TEXT
+        )
+
+    def _on_clear_selection_leave(self, _event: tk.Event[tk.Misc]) -> None:
+        enabled = (
+            not self._mass_distribution_mode
+            or self._active_distribution_event_key is not None
+        )
+        self.clear_selection_button.configure(
+            fg=MUTED if enabled else DISABLED_TEXT
+        )
 
     def _set_all_enabled(self, enabled: bool) -> None:
         self._release_entry_focus()
@@ -1105,6 +1505,10 @@ class ParticipantsPanel(tk.Frame):
         finally:
             self._bulk_selection = False
         self._refresh_select_all_state()
+        if self._mass_distribution_mode:
+            self._store_distribution_selection()
+            self._notify_distribution_participants_changed()
+            return
         self._schedule_auto_save(self.SELECTION_UPDATE_DELAY_MS)
 
     def _refresh_select_all_state(self) -> None:
@@ -1141,7 +1545,9 @@ class ParticipantsPanel(tk.Frame):
                     bm_var = row.get("bm")
                     if isinstance(bm_var, tk.StringVar):
                         try:
-                            bm_var.set(format_bm(parse_bm(bm_var.get())))
+                            formatted = format_bm(parse_bm(bm_var.get()))
+                            if bm_var.get() != formatted:
+                                bm_var.set(formatted)
                         except ValueError:
                             pass
                 if row.get("bm_entry") is entry or row.get("name_entry") is entry:
@@ -1160,25 +1566,38 @@ class ParticipantsPanel(tk.Frame):
         return "break"
 
     def _clear_entry_focus_on_click(self, event: tk.Event[tk.Misc]) -> None:
+        if self._focus_move_after_id is not None:
+            self.after_cancel(self._focus_move_after_id)
+            self._focus_move_after_id = None
+        clicked = event.widget
+        if isinstance(clicked, str):
+            try:
+                clicked = self.owner.nametowidget(clicked)
+            except (KeyError, tk.TclError):
+                # Native ttk popdown windows have no Python widget wrapper.
+                return
+        if not isinstance(clicked, tk.Misc):
+            return
         try:
             focused = self.owner.focus_get()
         except (KeyError, tk.TclError):
             return
-        if not isinstance(focused, tk.Entry) or event.widget is focused:
+        if not isinstance(focused, tk.Entry) or clicked is focused:
             return
         if self._is_panel_widget(focused):
             self._schedule_auto_save(0)
-        if isinstance(event.widget, tk.Entry):
+        if isinstance(clicked, tk.Entry):
             return
 
         def move_focus() -> None:
+            self._focus_move_after_id = None
             try:
-                if event.widget.winfo_exists():
-                    event.widget.focus_set()
+                if clicked.winfo_exists():
+                    clicked.focus_set()
             except (KeyError, tk.TclError):
                 pass
 
-        self.after_idle(move_focus)
+        self._focus_move_after_id = self.after_idle(move_focus)
 
     def _release_entry_focus(self) -> None:
         try:
@@ -1282,7 +1701,12 @@ class ParticipantsPanel(tk.Frame):
                 rows_valid = False
                 continue
             if name:
-                participants.append(Participant(name[:40], enabled_var.get(), bm))
+                persisted_enabled = (
+                    bool(row.get("draw_enabled", False))
+                    if self._mass_distribution_mode
+                    else enabled_var.get()
+                )
+                participants.append(Participant(name[:40], persisted_enabled, bm))
 
         if not rows_valid:
             return
@@ -1356,6 +1780,17 @@ class ParticipantsPanel(tk.Frame):
 
     def destroy(self) -> None:
         self._hide_last_win_tooltip()
+        for attribute in ("_focus_move_after_id", "_scroll_update_after_id"):
+            job = getattr(self, attribute, None)
+            if job is not None:
+                self.after_cancel(job)
+                setattr(self, attribute, None)
+        if self._distribution_pulse_after_id is not None:
+            try:
+                self.after_cancel(self._distribution_pulse_after_id)
+            except tk.TclError:
+                pass
+            self._distribution_pulse_after_id = None
         if self._auto_save_after_id is not None:
             try:
                 self.after_cancel(self._auto_save_after_id)
@@ -1378,12 +1813,25 @@ class ParticipantsPanel(tk.Frame):
         super().destroy()
 
     def _sync_scroll_region(self, _event: tk.Event[tk.Misc]) -> None:
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        self.after_idle(self._update_scrollbar_visibility)
+        self._schedule_scroll_update()
+
+    def _schedule_scroll_update(self) -> None:
+        if self._scroll_update_after_id is None:
+            self._scroll_update_after_id = self.after_idle(self._run_scroll_update)
+
+    def _run_scroll_update(self) -> None:
+        self._scroll_update_after_id = None
+        region = self.canvas.bbox("all")
+        if region != self._scroll_region:
+            self._scroll_region = region
+            self.canvas.configure(scrollregion=region)
+        self._update_scrollbar_visibility()
 
     def _resize_rows(self, event: tk.Event[tk.Misc]) -> None:
-        self.canvas.itemconfigure(self.rows_window, width=event.width)
-        self.after_idle(self._update_scrollbar_visibility)
+        if self._rows_canvas_width != event.width:
+            self._rows_canvas_width = event.width
+            self.canvas.itemconfigure(self.rows_window, width=event.width)
+        self._schedule_scroll_update()
 
     def _update_scrollbar_visibility(self) -> None:
         bbox = self.canvas.bbox("all")

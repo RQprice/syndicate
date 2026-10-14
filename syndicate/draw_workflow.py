@@ -54,6 +54,7 @@ class DrawWorkflowMixin:
         return [participant for participant in self.participants if participant.enabled]
 
     def _clear_winner_result(self) -> None:
+        self.winner_nickname_copy.refresh()
         self.result_var.set("")
         self.result_sort_button.place_forget()
         if self.result_card.winfo_manager():
@@ -91,6 +92,7 @@ class DrawWorkflowMixin:
             font=("Segoe UI Semibold", font_size),
             wraplength=self._px(740),
         )
+        self.winner_nickname_copy.refresh()
         if " | " in winner:
             self.result_sort_button.place(
                 relx=1.0,
